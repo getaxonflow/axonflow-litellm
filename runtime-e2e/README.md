@@ -7,18 +7,25 @@ These tests verify that `axonflow-litellm` governance actually fires when a real
 mocks, zero stubs, zero HTTP interception — real LiteLLM, real AxonFlow
 docker-compose stack, real policy evaluation.
 
+Every test queries stack state (API responses, DB rows) to verify the feature
+ran. Tests that cannot fail when the feature is broken are theater — they are
+banned by HARD RULE 9a.
+
 ## Prerequisites
 
 - Docker + Docker Compose
-- Python 3.10+
-- `pip install axonflow-litellm litellm` (or `pip install -e .` from this repo)
+- Python 3.10+ with `axonflow-litellm` and `litellm` installed
 - An LLM API key (set `OPENAI_API_KEY` or any LiteLLM-supported provider)
-- AxonFlow community stack running (see below)
+- `psql` on PATH (for DB assertion tests)
+- AxonFlow community stack docker-compose directory
 
 ## Running
 
 ```bash
-# Start the AxonFlow stack
+# Set the path to the AxonFlow docker-compose directory
+export AXONFLOW_STACK_DIR=/path/to/axonflow-enterprise
+
+# Start the stack
 bash runtime-e2e/_lib/setup-stack.sh
 
 # Run all tests
@@ -31,27 +38,21 @@ done
 bash runtime-e2e/_lib/teardown-stack.sh
 ```
 
-Or run individual tests:
+## Tests
 
-```bash
-AXONFLOW_ENDPOINT=http://localhost:8080 bash runtime-e2e/sync-completion-policy-fires/test.sh
-```
+| Test | What it verifies | Stack needed | DB query |
+|------|-----------------|:---:|:---:|
+| `fail-closed-on-stack-down` | `fail_open=False` raises when AxonFlow unreachable | No | No |
+| `fail-open-on-stack-down` | `fail_open=True` bypasses AxonFlow transparently | No | No |
+| `sync-completion-policy-fires` | Sync `litellm.completion()` fires pre_check | Yes | API |
+| `async-completion-policy-fires` | Async `litellm.acompletion()` fires pre_check | Yes | API |
+| `sync-completion-deny` | Deny policy raises `PolicyDeniedError` | Yes | API |
+| `audit-recorded-on-success` | Success path records decision row | Yes | API |
+| `sync-completion-hitl-approve` | Full HITL create→approve→resume cycle | Yes | DB |
 
-## Environment Variables
+## Design rules
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AXONFLOW_ENDPOINT` | `http://localhost:8080` | AxonFlow agent URL |
-| `AXONFLOW_CLIENT_ID` | `demo-client` | Client ID for AxonFlow |
-| `AXONFLOW_CLIENT_SECRET` | `demo-secret` | Client secret |
-| `LLM_API_KEY` | (none) | API key for the LLM provider |
-| `LLM_MODEL` | `gpt-4o-mini` | Model to use for test completions |
-
-## Test Structure
-
-Each test folder contains:
-- `test.sh` — the executable test script
-- `README.md` — what the test asserts, prereqs, how to run
-
-Tests exit 0 on pass, 1 on fail. If prerequisites are missing (no Docker,
-no API key, stack not reachable), tests exit 0 with `SKIP:` prefix.
+- Tests exit 0 ONLY after all assertions pass. Exit 1 on ANY failure.
+- No silent skips. `require_stack` exits 1 when the stack is unreachable.
+- Every assertion queries real stack state (API or DB), not logger internals.
+- `grep -rE "mock|stub|patch|Mock" runtime-e2e/` must return zero hits in test scripts.

@@ -1,83 +1,86 @@
 #!/usr/bin/env bash
-# Verify: HITL approval flow works end-to-end via logger.completion() (sync).
-# Creates a HITL request, auto-approves it via direct API, and verifies
-# the completion proceeds.
+# Verify: HITL approval plumbing works end-to-end.
+#
+# HITL queue is an Enterprise feature — this test requires an Enterprise stack.
+# On community stacks, exits 1. The release workflow conditionally runs this
+# test only when AXONFLOW_STACK_TIER=enterprise.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../_lib/common.sh"
-runtime_e2e_skip_if_unavailable
+require_stack
 
 echo "=== sync-completion-hitl-approve ==="
 
-python3 -u - <<'PYEOF'
-import sys
-import os
-import threading
-import time
-import requests
-from axonflow_litellm import AxonFlowLogger, AxonFlowLoggerConfig, ApprovalRejected, ApprovalTimeout
+# Verify HITL is enabled — fail hard if not
+HITL_STATUS=$(curl -sf "${AXONFLOW_ENDPOINT}/api/v1/hitl/status" 2>/dev/null || echo "")
+HITL_ENABLED=$(echo "$HITL_STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('enabled',False))" 2>/dev/null || echo "false")
 
-endpoint = os.environ["AXONFLOW_ENDPOINT"]
-client_id = os.environ["AXONFLOW_CLIENT_ID"]
-client_secret = os.environ.get("AXONFLOW_CLIENT_SECRET", "")
+if [ "$HITL_ENABLED" != "True" ] && [ "$HITL_ENABLED" != "true" ]; then
+  echo "FAIL: HITL is disabled on this stack (community mode)"
+  echo "  HITL status: $HITL_STATUS"
+  echo "  This test requires an Enterprise stack with HITL enabled."
+  echo "  Run with AXONFLOW_STACK_TIER=enterprise or skip this test in the workflow."
+  exit 1
+fi
 
-logger = AxonFlowLogger(AxonFlowLoggerConfig(
-    endpoint=endpoint,
-    client_id=client_id,
-    client_secret=client_secret,
-    approval_poll_interval_seconds=1.0,
-    approval_max_wait_seconds=30.0,
-))
+require_psql
 
-def auto_approve_worker():
-    """Background thread that polls the HITL queue and approves any pending request."""
-    for _ in range(30):
-        time.sleep(1)
-        try:
-            resp = requests.get(
-                f"{endpoint}/api/v1/hitl/queue",
-                auth=(client_id, client_secret),
-                timeout=5,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                items = data.get("data", data.get("items", []))
-                if isinstance(items, list):
-                    for item in items:
-                        if item.get("status") == "pending":
-                            req_id = item.get("request_id")
-                            requests.post(
-                                f"{endpoint}/api/v1/hitl/queue/{req_id}/review",
-                                json={"action": "approve", "comment": "auto-approved by e2e"},
-                                auth=(client_id, client_secret),
-                                timeout=5,
-                            )
-                            print(f"Auto-approved HITL request {req_id}")
-                            return
-        except Exception:
-            pass
+MARKER="e2e-hitl-$(date +%s)-$RANDOM"
 
-approver = threading.Thread(target=auto_approve_worker, daemon=True)
-approver.start()
+# Step 1: Create HITL request via API
+echo "Creating HITL request..."
+CREATE_RESPONSE=$(curl -sf -X POST "${AXONFLOW_ENDPOINT}/api/v1/hitl/queue" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Basic $(echo -n "${AXONFLOW_CLIENT_ID}:${AXONFLOW_CLIENT_SECRET}" | base64)" \
+  -d "{
+    \"client_id\": \"${AXONFLOW_CLIENT_ID}\",
+    \"original_query\": \"HITL E2E test: ${MARKER}\",
+    \"request_type\": \"litellm-completion\",
+    \"triggered_policy_id\": \"e2e-test-policy\",
+    \"triggered_policy_name\": \"E2E Test Policy\",
+    \"trigger_reason\": \"require_approval\",
+    \"severity\": \"high\"
+  }")
 
-try:
-    response = logger.completion(
-        model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
-        messages=[{"role": "user", "content": "Approve disbursement of $50,000"}],
-        max_tokens=20,
-    )
-    print(f"LLM response: {response.choices[0].message.content[:100]}")
-    print("HITL_APPROVE_TEST=approved")
-except ApprovalTimeout as e:
-    print(f"ApprovalTimeout: {e.reason}")
-    print("HITL_APPROVE_TEST=timeout")
-except ApprovalRejected as e:
-    print(f"ApprovalRejected: {e.reason}")
-    print("HITL_APPROVE_TEST=rejected")
-except Exception as e:
-    # If the stack doesn't have a require_approval policy, the call goes through
-    print(f"Exception: {type(e).__name__}: {e}")
-    print("HITL_APPROVE_TEST=no_hitl_policy")
-PYEOF
+if [ -z "$CREATE_RESPONSE" ]; then
+  echo "FAIL: HITL queue create returned empty response"
+  exit 1
+fi
 
-echo "PASS: sync-completion-hitl-approve"
+echo "Create response: $CREATE_RESPONSE"
+REQUEST_ID=$(echo "$CREATE_RESPONSE" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+inner = data.get('data', data)
+print(inner.get('request_id', ''))
+" 2>/dev/null || echo "")
+
+if [ -z "$REQUEST_ID" ]; then
+  echo "FAIL: could not extract request_id from HITL create response"
+  exit 1
+fi
+
+# Step 2: Verify pending status in DB
+INITIAL_STATUS=$(run_psql -c "SELECT status FROM hitl_approval_queue WHERE request_id = '${REQUEST_ID}'")
+echo "Initial DB status: $INITIAL_STATUS"
+
+if [ "$INITIAL_STATUS" != "pending" ]; then
+  echo "FAIL: expected initial status=pending, got '$INITIAL_STATUS'"
+  exit 1
+fi
+
+# Step 3: Approve
+echo "Approving HITL request..."
+approve_hitl_request "$REQUEST_ID"
+
+# Step 4: Verify approved status in DB
+sleep 1
+FINAL_STATUS=$(run_psql -c "SELECT status FROM hitl_approval_queue WHERE request_id = '${REQUEST_ID}'")
+echo "Final DB status: $FINAL_STATUS"
+
+if [ "$FINAL_STATUS" != "approved" ]; then
+  echo "FAIL: expected final status=approved, got '$FINAL_STATUS'"
+  exit 1
+fi
+
+echo "PASS: sync-completion-hitl-approve — HITL create→approve cycle verified in DB"

@@ -110,6 +110,8 @@ jobs:
   runtime-e2e:
     needs: build
     runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -121,19 +123,35 @@ jobs:
       - name: Install package from local checkout
         run: pip install -e .
 
-      - name: Start AxonFlow stack
-        run: |
-          if [ -f runtime-e2e/_lib/setup-stack.sh ]; then
-            bash runtime-e2e/_lib/setup-stack.sh
-          else
-            echo "SKIP: no setup-stack.sh — runtime-e2e tests will skip if stack unavailable"
-          fi
+      - name: Record start time
+        run: echo "E2E_START=$(date +%s)" >> $GITHUB_ENV
 
-      - name: Run fail-closed-on-stack-down
+      - name: Run fail-closed-on-stack-down (no stack needed)
         run: bash runtime-e2e/fail-closed-on-stack-down/test.sh
 
-      - name: Run fail-open-on-stack-down
+      - name: Run fail-open-on-stack-down (no stack needed)
         run: bash runtime-e2e/fail-open-on-stack-down/test.sh
+
+      - name: Clone AxonFlow platform for docker-compose
+        run: |
+          git clone --depth 1 https://${{ secrets.GH_SYNC_TOKEN }}@github.com/getaxonflow/axonflow-enterprise.git /tmp/axonflow-enterprise
+
+      - name: Start AxonFlow stack
+        run: |
+          cd /tmp/axonflow-enterprise
+          docker compose -f docker-compose.yml up -d --wait --timeout 120
+          echo "Waiting for agent health..."
+          for i in $(seq 1 30); do
+            if curl -sf --max-time 5 http://localhost:8080/health &>/dev/null; then
+              echo "AxonFlow stack healthy"
+              break
+            fi
+            sleep 2
+          done
+          curl -sf http://localhost:8080/health || (echo "FAIL: stack not healthy after 60s" && exit 1)
+
+      - name: Install psql for DB assertions
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
 
       - name: Run sync-completion-policy-fires
         run: bash runtime-e2e/sync-completion-policy-fires/test.sh
@@ -150,11 +168,22 @@ jobs:
       - name: Run sync-completion-hitl-approve
         run: bash runtime-e2e/sync-completion-hitl-approve/test.sh
 
+      - name: Wall-time floor sanity check
+        run: |
+          E2E_END=$(date +%s)
+          ELAPSED=$((E2E_END - E2E_START))
+          echo "Runtime-e2e total: ${ELAPSED}s"
+          if [ "$ELAPSED" -lt 30 ]; then
+            echo "FAIL: runtime-e2e completed in ${ELAPSED}s — suspiciously fast, likely silent skips"
+            exit 1
+          fi
+
       - name: Teardown stack
         if: always()
         run: |
-          if [ -f runtime-e2e/_lib/teardown-stack.sh ]; then
-            bash runtime-e2e/_lib/teardown-stack.sh
+          if [ -d /tmp/axonflow-enterprise ]; then
+            cd /tmp/axonflow-enterprise
+            docker compose -f docker-compose.yml down -v --timeout 10 || true
           fi
 
   publish-pypi:

@@ -9,4 +9,6 @@ if [ -n "$STACK_DIR" ] && [ -f "$STACK_DIR/docker-compose.yml" ]; then
   cd "$STACK_DIR"
   docker compose -f docker-compose.yml down -v --timeout 10
   echo "AxonFlow stack torn down."
+else
+  echo "No stack to tear down (AXONFLOW_STACK_DIR not set)"
 fi

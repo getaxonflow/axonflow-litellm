@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock
 
-
 # ---------------------------------------------------------------------------
 # litellm stub
 # ---------------------------------------------------------------------------
@@ -44,25 +43,44 @@ def _install_litellm_stub() -> None:
         def __init__(self) -> None:
             pass
 
-        def log_pre_api_call(self, model: str, messages: Any, kwargs: dict) -> None:
+        def log_pre_api_call(
+            self, model: str, messages: Any, kwargs: dict
+        ) -> None:
             pass
 
-        async def async_log_pre_api_call(self, model: str, messages: Any, kwargs: dict) -> None:
+        async def async_log_pre_api_call(
+            self, model: str, messages: Any, kwargs: dict
+        ) -> None:
             pass
 
-        def log_post_api_call(self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any) -> None:
+        def log_post_api_call(
+            self, kwargs: dict, response_obj: Any,
+            start_time: Any, end_time: Any,
+        ) -> None:
             pass
 
-        def log_success_event(self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any) -> None:
+        def log_success_event(
+            self, kwargs: dict, response_obj: Any,
+            start_time: Any, end_time: Any,
+        ) -> None:
             pass
 
-        async def async_log_success_event(self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any) -> None:
+        async def async_log_success_event(
+            self, kwargs: dict, response_obj: Any,
+            start_time: Any, end_time: Any,
+        ) -> None:
             pass
 
-        def log_failure_event(self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any) -> None:
+        def log_failure_event(
+            self, kwargs: dict, response_obj: Any,
+            start_time: Any, end_time: Any,
+        ) -> None:
             pass
 
-        async def async_log_failure_event(self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any) -> None:
+        async def async_log_failure_event(
+            self, kwargs: dict, response_obj: Any,
+            start_time: Any, end_time: Any,
+        ) -> None:
             pass
 
     custom_logger_mod.CustomLogger = CustomLogger  # type: ignore[attr-defined]

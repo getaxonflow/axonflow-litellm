@@ -97,6 +97,14 @@ config = AxonFlowLoggerConfig(
 )
 ```
 
+## Sync vs. Async
+
+Both `litellm.completion()` (sync) and `litellm.acompletion()` (async) are fully supported.
+
+When registered via `litellm.callbacks`, sync hooks delegate to their async counterparts via `asyncio.run()`. This adds minor overhead (~1ms) per hook call in the sync path. For performance-critical sync workloads, use `logger.completion()` directly (governance wrapper) which amortizes the event loop creation.
+
+If sync hooks are invoked inside a running event loop (unusual — e.g., sync callbacks from an async framework), a one-time `RuntimeWarning` is emitted directing you to `acompletion()`.
+
 ## Exceptions
 
 | Exception | When |
@@ -106,6 +114,8 @@ config = AxonFlowLoggerConfig(
 | `ApprovalTimeout` | HITL approval timed out |
 
 All exceptions carry `.reason` (string) and `.policies` (list of policy IDs).
+
+These exceptions do NOT extend `litellm.exceptions.APIError` — catch governance denials via `PolicyDeniedError`, not LiteLLM's exception hierarchy.
 
 ## MCP Governance
 

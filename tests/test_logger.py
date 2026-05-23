@@ -5,10 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import time
 from datetime import datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,14 +17,13 @@ from axonflow_litellm.logger import (
     ApprovalTimeout,
     AxonFlowLogger,
     PolicyDeniedError,
-    _CircuitBreaker,
     _BreakerState,
-    _extract_query,
-    _infer_provider,
-    _extract_summary,
+    _CircuitBreaker,
     _elapsed_ms,
+    _extract_query,
+    _extract_summary,
+    _infer_provider,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -664,7 +662,9 @@ class TestCallbackHooks:
         fake_client.audit_llm_call.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_async_log_success_skips_without_context_id(self, config, fake_client, make_response) -> None:
+    async def test_async_log_success_skips_without_context_id(
+        self, config, fake_client, make_response
+    ) -> None:
         logger = AxonFlowLogger.from_client(fake_client, config)
 
         kwargs: dict[str, Any] = {"litellm_params": {"metadata": {}}, "model": "gpt-4o"}
@@ -696,12 +696,45 @@ class TestCallbackHooks:
         audit_kwargs = fake_client.audit_llm_call.call_args.kwargs
         assert "[ERROR]" in audit_kwargs["response_summary"]
 
-    @pytest.mark.asyncio
-    async def test_sync_hooks_are_noops_in_async_context(self, config, fake_client) -> None:
+    def test_sync_log_pre_api_call_invokes_pre_check(
+        self, config, fake_client
+    ) -> None:
+        """Sync hook fires governance via asyncio.run — NOT a no-op."""
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
         logger = AxonFlowLogger.from_client(fake_client, config)
-        logger.log_pre_api_call("gpt-4o", [], {})
-        logger.log_success_event({}, None, None, None)
-        logger.log_failure_event({}, None, None, None)
+        kwargs: dict[str, Any] = {"litellm_params": {"metadata": {}}}
+
+        logger.log_pre_api_call(
+            "gpt-4o", [{"role": "user", "content": "hi"}], kwargs
+        )
+
+        fake_client.pre_check.assert_awaited_once()
+        assert kwargs.get("_axonflow_context_id") == "ctx-ok"
+
+    def test_sync_log_success_event_audits(
+        self, config, fake_client, make_response
+    ) -> None:
+        """Sync success hook fires audit via asyncio.run."""
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+        fake_client.audit_llm_call = AsyncMock()
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+
+        kwargs: dict[str, Any] = {
+            "litellm_params": {"metadata": {}},
+            "model": "gpt-4o",
+        }
+        logger.log_pre_api_call(
+            "gpt-4o", [{"role": "user", "content": "hi"}], kwargs
+        )
+
+        now = datetime.now()
+        logger.log_success_event(
+            kwargs, make_response(), now - timedelta(seconds=1), now
+        )
+
+        fake_client.audit_llm_call.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +752,7 @@ class TestClientOwnership:
     @pytest.mark.asyncio
     async def test_owned_client_is_closed(self, config) -> None:
         logger = AxonFlowLogger(config)
-        client = await logger._get_client()
+        await logger._get_client()
         await logger.aclose()
         assert logger._client is None
 

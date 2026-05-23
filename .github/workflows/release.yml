@@ -43,8 +43,18 @@ jobs:
           path: /tmp/release-body-final.md
           retention-days: 1
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install ruff
+      - run: ruff check .
+
   build:
-    needs: preflight
+    needs: [preflight, lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,8 +106,46 @@ jobs:
           name: dist
           path: dist/
 
-  publish-pypi:
+  runtime-e2e:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install package from local checkout
+        run: pip install -e .
+
+      - name: Start AxonFlow stack
+        run: |
+          if [ -f runtime-e2e/_lib/setup-stack.sh ]; then
+            bash runtime-e2e/_lib/setup-stack.sh
+          else
+            echo "SKIP: no setup-stack.sh — runtime-e2e tests will skip if stack unavailable"
+          fi
+
+      - name: Run sync-completion-policy-fires
+        run: bash runtime-e2e/sync-completion-policy-fires/test.sh
+
+      - name: Run async-completion-policy-fires
+        run: bash runtime-e2e/async-completion-policy-fires/test.sh
+
+      - name: Run sync-completion-deny
+        run: bash runtime-e2e/sync-completion-deny/test.sh
+
+      - name: Teardown stack
+        if: always()
+        run: |
+          if [ -f runtime-e2e/_lib/teardown-stack.sh ]; then
+            bash runtime-e2e/_lib/teardown-stack.sh
+          fi
+
+  publish-pypi:
+    needs: [build, runtime-e2e]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

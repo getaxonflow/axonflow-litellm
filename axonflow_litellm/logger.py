@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import warnings
 from enum import Enum
 from typing import Any
 
@@ -135,6 +136,7 @@ class AxonFlowLogger(CustomLogger):
             failure_threshold=config.breaker_failure_threshold,
             recovery_seconds=config.breaker_recovery_seconds,
         )
+        self._sync_warned = False
 
     @classmethod
     def from_client(
@@ -216,7 +218,7 @@ class AxonFlowLogger(CustomLogger):
             _log.debug("axonflow.%s skipped: circuit open", op_name)
             if not fail_open:
                 raise PolicyDeniedError(
-                    f"AxonFlow unreachable (circuit open) — fail_open=False"
+                    "AxonFlow unreachable (circuit open) — fail_open=False"
                 )
             return None
         outcome = "failure"
@@ -237,7 +239,7 @@ class AxonFlowLogger(CustomLogger):
                 )
                 if not fail_open:
                     raise PolicyDeniedError(
-                        f"AxonFlow timed out — fail_open=False"
+                        "AxonFlow timed out — fail_open=False"
                     )
                 return None
             except Exception as exc:
@@ -390,11 +392,9 @@ class AxonFlowLogger(CustomLogger):
     def log_pre_api_call(
         self, model: str, messages: Any, kwargs: dict[str, Any]
     ) -> None:
-        try:
-            asyncio.get_running_loop()
-            return
-        except RuntimeError:
-            pass
+        self._run_sync_hook(
+            self.async_log_pre_api_call(model, messages, kwargs)
+        )
 
     async def async_log_success_event(
         self,
@@ -422,7 +422,11 @@ class AxonFlowLogger(CustomLogger):
         start_time: Any,
         end_time: Any,
     ) -> None:
-        pass
+        self._run_sync_hook(
+            self.async_log_success_event(
+                kwargs, response_obj, start_time, end_time
+            )
+        )
 
     async def async_log_failure_event(
         self,
@@ -459,7 +463,42 @@ class AxonFlowLogger(CustomLogger):
         start_time: Any,
         end_time: Any,
     ) -> None:
-        pass
+        self._run_sync_hook(
+            self.async_log_failure_event(
+                kwargs, response_obj, start_time, end_time
+            )
+        )
+
+    # ----- Internal: sync hook bridge ----------------------------------------
+
+    def _run_sync_hook(self, coro: Any) -> None:
+        """Run an async hook coroutine from a sync context.
+
+        When no event loop is running (the common ``litellm.completion()``
+        path), delegates to ``asyncio.run()``.  When an event loop IS
+        running (async caller using sync hooks — unusual), emits a
+        one-time warning and skips the hook to avoid deadlock.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                asyncio.run(coro)
+            except Exception:
+                _log.debug("Sync hook failed (non-blocking)", exc_info=True)
+            return
+
+        if not self._sync_warned:
+            self._sync_warned = True
+            warnings.warn(
+                "axonflow-litellm: sync callback hooks invoked inside a "
+                "running event loop — governance skipped for this call. "
+                "Use logger.acompletion() or litellm.acompletion() for "
+                "async contexts.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        coro.close()
 
     # ----- Internal: pre-check + audit -------------------------------------
 

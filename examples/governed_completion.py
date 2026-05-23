@@ -25,6 +25,7 @@ import litellm
 
 from axonflow_litellm import (
     ApprovalRejected,
+    ApprovalTimeout,
     AxonFlowLogger,
     AxonFlowLoggerConfig,
     PolicyDeniedError,
@@ -88,8 +89,10 @@ def main() -> None:
             ],
         )
         print(f"Approved! Response: {response.choices[0].message.content[:200]}")
+    except ApprovalTimeout as e:
+        print(f"Approval timed out: {e.reason}")
     except ApprovalRejected as e:
-        print(f"Approval rejected or timed out: {e.reason}")
+        print(f"Approval rejected: {e.reason}")
     except PolicyDeniedError as e:
         print(f"Denied: {e.reason}")
     except Exception as e:

@@ -381,6 +381,31 @@ class TestHITLFlow:
         assert fake_client.get_hitl_request.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_approval_timeout_raises_approval_timeout(self, fake_client) -> None:
+        """Client-side deadline exceeded raises ApprovalTimeout, not ApprovalRejected."""
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            approval_poll_interval_seconds=0.05,
+            approval_max_wait_seconds=0.1,
+        )
+        fake_client.pre_check = AsyncMock(return_value=_require_approval_result())
+        fake_client.create_hitl_request = AsyncMock(
+            return_value=HITLApprovalRequest(request_id="hitl-1", status="pending")
+        )
+        fake_client.get_hitl_request = AsyncMock(
+            return_value=HITLApprovalRequest(request_id="hitl-1", status="pending")
+        )
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(ApprovalTimeout, match="timed out"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "approve me"}],
+            )
+
+    @pytest.mark.asyncio
     async def test_require_approval_exact_sentinel(self, config, fake_client) -> None:
         """Substring 'approval' should NOT trigger HITL — exact match only."""
         result = PolicyApprovalResult(
@@ -420,7 +445,7 @@ class TestFailOpen:
         assert response is not None
 
     @pytest.mark.asyncio
-    async def test_pre_check_error_fail_closed(self, fake_client) -> None:
+    async def test_pre_check_error_fail_closed_raises(self, fake_client) -> None:
         config = AxonFlowLoggerConfig(
             endpoint="http://localhost:8080",
             client_id="c",
@@ -430,11 +455,33 @@ class TestFailOpen:
         fake_client.pre_check = AsyncMock(side_effect=Exception("connection refused"))
 
         logger = AxonFlowLogger.from_client(fake_client, config)
-        response = await logger.acompletion(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": "hi"}],
+        with pytest.raises(Exception, match="connection refused"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_pre_check_timeout_fail_closed_raises(self, fake_client) -> None:
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            fail_open=False,
+            call_timeout_seconds=0.1,
         )
-        assert response is not None
+
+        async def slow_pre_check(**kwargs: Any) -> Any:
+            await asyncio.sleep(10)
+
+        fake_client.pre_check = slow_pre_check
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="fail_open=False"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
 
     @pytest.mark.asyncio
     async def test_pre_check_timeout_fail_open(self, fake_client) -> None:

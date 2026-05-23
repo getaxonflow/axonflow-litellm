@@ -214,8 +214,10 @@ class AxonFlowLogger(CustomLogger):
         """
         if not await self._breaker.acquire():
             _log.debug("axonflow.%s skipped: circuit open", op_name)
-            if fail_open:
-                return None
+            if not fail_open:
+                raise PolicyDeniedError(
+                    f"AxonFlow unreachable (circuit open) — fail_open=False"
+                )
             return None
         outcome = "failure"
         try:
@@ -233,6 +235,10 @@ class AxonFlowLogger(CustomLogger):
                     self._config.call_timeout_seconds,
                     "failing open" if fail_open else "failing closed",
                 )
+                if not fail_open:
+                    raise PolicyDeniedError(
+                        f"AxonFlow timed out — fail_open=False"
+                    )
                 return None
             except Exception as exc:
                 _log.warning(
@@ -242,13 +248,13 @@ class AxonFlowLogger(CustomLogger):
                     "failing open" if fail_open else "failing closed",
                 )
                 if not fail_open:
-                    return None
+                    raise
                 return None
         finally:
             if outcome == "success":
-                await self._breaker.record_success()
+                await asyncio.shield(self._breaker.record_success())
             else:
-                await self._breaker.record_failure()
+                await asyncio.shield(self._breaker.record_failure())
 
     # ----- Governance wrappers ---------------------------------------------
 
@@ -296,12 +302,17 @@ class AxonFlowLogger(CustomLogger):
             policies = pre_check_result.policies
 
             if block_reason == "require_approval" and self._config.enable_hitl_polling:
-                approved = await self._hitl_flow(
+                hitl_result = await self._hitl_flow(
                     pre_check_result, model, query, token
                 )
-                if not approved:
+                if hitl_result == "timeout":
+                    raise ApprovalTimeout(
+                        "Approval request timed out",
+                        policies=policies,
+                    )
+                if hitl_result != "approved":
                     raise ApprovalRejected(
-                        "Approval request was rejected or timed out",
+                        "Approval request was rejected",
                         policies=policies,
                     )
             else:
@@ -502,33 +513,34 @@ class AxonFlowLogger(CustomLogger):
         model: str,
         query: str,
         user_token: str,
-    ) -> bool:
+    ) -> str:
         """4-step HITL flow: create row -> poll -> resume/deny.
 
-        Returns True if approved, False otherwise.  Uses a local
-        consecutive-failure counter for polling (not the shared breaker)
-        so a broken polling endpoint does not trip the breaker open for
-        all other governance calls.
+        Returns ``"approved"``, ``"rejected"``, or ``"timeout"``.  Uses a
+        local consecutive-failure counter for polling (not the shared
+        breaker) so a broken polling endpoint does not trip the breaker
+        open for all other governance calls.
         """
-        from axonflow.hitl import HITLCreateInput
-
         policies = pre_check_result.policies or []
         first_policy = policies[0] if policies else None
 
-        created = await self._call_with_guard(
-            "create_hitl",
-            lambda: self._do_create_hitl(
-                query=query,
-                user_token=user_token,
-                model=model,
-                first_policy=first_policy,
-                block_reason=pre_check_result.block_reason,
-            ),
-            fail_open=False,
-        )
+        try:
+            created = await self._call_with_guard(
+                "create_hitl",
+                lambda: self._do_create_hitl(
+                    query=query,
+                    user_token=user_token,
+                    model=model,
+                    first_policy=first_policy,
+                    block_reason=pre_check_result.block_reason,
+                ),
+                fail_open=False,
+            )
+        except Exception:
+            return "rejected"
 
         if created is None:
-            return False
+            return "rejected"
 
         request_id = created.request_id
         deadline = time.monotonic() + self._config.approval_max_wait_seconds
@@ -546,9 +558,9 @@ class AxonFlowLogger(CustomLogger):
                 consecutive_failures = 0
 
                 if req.status == "approved":
-                    return True
+                    return "approved"
                 if req.status in ("rejected", "expired"):
-                    return False
+                    return "rejected"
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -558,13 +570,13 @@ class AxonFlowLogger(CustomLogger):
                         "HITL polling failed %d times consecutively; denying",
                         consecutive_failures,
                     )
-                    return False
+                    return "rejected"
 
         _log.warning(
             "HITL approval timed out after %.0fs",
             self._config.approval_max_wait_seconds,
         )
-        return False
+        return "timeout"
 
     async def _do_create_hitl(
         self,

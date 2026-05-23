@@ -15,7 +15,7 @@ import os
 import threading
 import time
 import requests
-from axonflow_litellm import AxonFlowLogger, AxonFlowLoggerConfig, ApprovalRejected
+from axonflow_litellm import AxonFlowLogger, AxonFlowLoggerConfig, ApprovalRejected, ApprovalTimeout
 
 endpoint = os.environ["AXONFLOW_ENDPOINT"]
 client_id = os.environ["AXONFLOW_CLIENT_ID"]
@@ -68,6 +68,9 @@ try:
     )
     print(f"LLM response: {response.choices[0].message.content[:100]}")
     print("HITL_APPROVE_TEST=approved")
+except ApprovalTimeout as e:
+    print(f"ApprovalTimeout: {e.reason}")
+    print("HITL_APPROVE_TEST=timeout")
 except ApprovalRejected as e:
     print(f"ApprovalRejected: {e.reason}")
     print("HITL_APPROVE_TEST=rejected")

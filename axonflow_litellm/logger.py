@@ -217,9 +217,7 @@ class AxonFlowLogger(CustomLogger):
         if not await self._breaker.acquire():
             _log.debug("axonflow.%s skipped: circuit open", op_name)
             if not fail_open:
-                raise PolicyDeniedError(
-                    "AxonFlow unreachable (circuit open) — fail_open=False"
-                )
+                raise PolicyDeniedError("AxonFlow unreachable (circuit open) — fail_open=False")
             return None
         outcome = "failure"
         try:
@@ -238,9 +236,7 @@ class AxonFlowLogger(CustomLogger):
                     "failing open" if fail_open else "failing closed",
                 )
                 if not fail_open:
-                    raise PolicyDeniedError(
-                        "AxonFlow timed out — fail_open=False"
-                    )
+                    raise PolicyDeniedError("AxonFlow timed out — fail_open=False")
                 return None
             except Exception as exc:
                 _log.warning(
@@ -304,9 +300,7 @@ class AxonFlowLogger(CustomLogger):
             policies = pre_check_result.policies
 
             if block_reason == "require_approval" and self._config.enable_hitl_polling:
-                hitl_result = await self._hitl_flow(
-                    pre_check_result, model, query, token
-                )
+                hitl_result = await self._hitl_flow(pre_check_result, model, query, token)
                 if hitl_result == "timeout":
                     raise ApprovalTimeout(
                         "Approval request timed out",
@@ -320,9 +314,7 @@ class AxonFlowLogger(CustomLogger):
             else:
                 raise PolicyDeniedError(block_reason, policies=policies)
 
-        context_id = (
-            pre_check_result.context_id if pre_check_result else None
-        )
+        context_id = pre_check_result.context_id if pre_check_result else None
 
         metadata = kwargs.get("metadata") or {}
         if context_id:
@@ -337,9 +329,7 @@ class AxonFlowLogger(CustomLogger):
         if context_id:
             await self._call_with_guard(
                 "audit",
-                lambda: self._do_audit(
-                    context_id, response, model, latency_ms
-                ),
+                lambda: self._do_audit(context_id, response, model, latency_ms),
             )
 
         return response
@@ -355,9 +345,7 @@ class AxonFlowLogger(CustomLogger):
         Drop-in replacement for ``litellm.completion()``.  Use
         ``acompletion()`` in async contexts.
         """
-        return asyncio.run(
-            self.acompletion(user_token=user_token, **kwargs)
-        )
+        return asyncio.run(self.acompletion(user_token=user_token, **kwargs))
 
     # ----- CustomLogger hooks (audit-only callback mode) -------------------
 
@@ -389,12 +377,8 @@ class AxonFlowLogger(CustomLogger):
         except Exception:
             pass
 
-    def log_pre_api_call(
-        self, model: str, messages: Any, kwargs: dict[str, Any]
-    ) -> None:
-        self._run_sync_hook(
-            self.async_log_pre_api_call(model, messages, kwargs)
-        )
+    def log_pre_api_call(self, model: str, messages: Any, kwargs: dict[str, Any]) -> None:
+        self._run_sync_hook(self.async_log_pre_api_call(model, messages, kwargs))
 
     async def async_log_success_event(
         self,
@@ -423,9 +407,7 @@ class AxonFlowLogger(CustomLogger):
         end_time: Any,
     ) -> None:
         self._run_sync_hook(
-            self.async_log_success_event(
-                kwargs, response_obj, start_time, end_time
-            )
+            self.async_log_success_event(kwargs, response_obj, start_time, end_time)
         )
 
     async def async_log_failure_event(
@@ -464,9 +446,7 @@ class AxonFlowLogger(CustomLogger):
         end_time: Any,
     ) -> None:
         self._run_sync_hook(
-            self.async_log_failure_event(
-                kwargs, response_obj, start_time, end_time
-            )
+            self.async_log_failure_event(kwargs, response_obj, start_time, end_time)
         )
 
     # ----- Internal: sync hook bridge ----------------------------------------
@@ -502,9 +482,7 @@ class AxonFlowLogger(CustomLogger):
 
     # ----- Internal: pre-check + audit -------------------------------------
 
-    async def _do_pre_check(
-        self, user_token: str, query: str, context: dict[str, Any]
-    ) -> Any:
+    async def _do_pre_check(self, user_token: str, query: str, context: dict[str, Any]) -> Any:
         client = await self._get_client()
         return await client.pre_check(
             user_token=user_token,
@@ -647,10 +625,7 @@ class AxonFlowLogger(CustomLogger):
     @staticmethod
     def _resolve_context_id(kwargs: dict[str, Any]) -> str | None:
         metadata = (kwargs.get("litellm_params") or {}).get("metadata") or {}
-        return (
-            metadata.get(_METADATA_CONTEXT_ID)
-            or kwargs.get(_KWARGS_CONTEXT_ID)
-        )
+        return metadata.get(_METADATA_CONTEXT_ID) or kwargs.get(_KWARGS_CONTEXT_ID)
 
 
 # ---------------------------------------------------------------------------

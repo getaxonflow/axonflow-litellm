@@ -9,8 +9,10 @@ runtime_e2e_skip_if_unavailable
 echo "=== sync-completion-policy-fires ==="
 
 MARKER="litellm-sync-e2e-$(date +%s)-$RANDOM"
+OUTPUT=$(mktemp -t axonflow-sync-e2e.XXXXXX)
+trap 'rm -f "$OUTPUT"' EXIT
 
-python3 -u - "$MARKER" <<'PYEOF'
+python3 -u - "$MARKER" > "$OUTPUT" 2>&1 <<'PYEOF'
 import sys
 import os
 import litellm
@@ -43,5 +45,12 @@ except Exception as e:
         print(f"ERROR: unexpected exception: {e}")
         sys.exit(1)
 PYEOF
+
+cat "$OUTPUT"
+
+if ! grep -q "SYNC_GOVERNANCE_FIRED=true" "$OUTPUT"; then
+  echo "FAIL: sync governance did not fire — SYNC_GOVERNANCE_FIRED=true not in output"
+  exit 1
+fi
 
 echo "PASS: sync-completion-policy-fires"

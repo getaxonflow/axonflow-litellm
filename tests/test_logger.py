@@ -688,33 +688,25 @@ class TestCallbackHooks:
 
         error = Exception("LLM provider error")
         now = datetime.now()
-        await logger.async_log_failure_event(
-            kwargs, error, now - timedelta(seconds=2), now
-        )
+        await logger.async_log_failure_event(kwargs, error, now - timedelta(seconds=2), now)
 
         fake_client.audit_llm_call.assert_awaited_once()
         audit_kwargs = fake_client.audit_llm_call.call_args.kwargs
         assert "[ERROR]" in audit_kwargs["response_summary"]
 
-    def test_sync_log_pre_api_call_invokes_pre_check(
-        self, config, fake_client
-    ) -> None:
+    def test_sync_log_pre_api_call_invokes_pre_check(self, config, fake_client) -> None:
         """Sync hook fires governance via asyncio.run — NOT a no-op."""
         fake_client.pre_check = AsyncMock(return_value=_approved_result())
 
         logger = AxonFlowLogger.from_client(fake_client, config)
         kwargs: dict[str, Any] = {"litellm_params": {"metadata": {}}}
 
-        logger.log_pre_api_call(
-            "gpt-4o", [{"role": "user", "content": "hi"}], kwargs
-        )
+        logger.log_pre_api_call("gpt-4o", [{"role": "user", "content": "hi"}], kwargs)
 
         fake_client.pre_check.assert_awaited_once()
         assert kwargs.get("_axonflow_context_id") == "ctx-ok"
 
-    def test_sync_log_success_event_audits(
-        self, config, fake_client, make_response
-    ) -> None:
+    def test_sync_log_success_event_audits(self, config, fake_client, make_response) -> None:
         """Sync success hook fires audit via asyncio.run."""
         fake_client.pre_check = AsyncMock(return_value=_approved_result())
         fake_client.audit_llm_call = AsyncMock()
@@ -725,14 +717,10 @@ class TestCallbackHooks:
             "litellm_params": {"metadata": {}},
             "model": "gpt-4o",
         }
-        logger.log_pre_api_call(
-            "gpt-4o", [{"role": "user", "content": "hi"}], kwargs
-        )
+        logger.log_pre_api_call("gpt-4o", [{"role": "user", "content": "hi"}], kwargs)
 
         now = datetime.now()
-        logger.log_success_event(
-            kwargs, make_response(), now - timedelta(seconds=1), now
-        )
+        logger.log_success_event(kwargs, make_response(), now - timedelta(seconds=1), now)
 
         fake_client.audit_llm_call.assert_awaited_once()
 

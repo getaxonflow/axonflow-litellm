@@ -3,10 +3,10 @@
 
 set -euo pipefail
 
-ENTERPRISE_DIR="${AXONFLOW_ENTERPRISE_DIR:-$(cd "$(dirname "$0")/../../../../axonflow-enterprise" 2>/dev/null && pwd || echo "")}"
+STACK_DIR="${AXONFLOW_STACK_DIR:-}"
 
-if [ -n "$ENTERPRISE_DIR" ] && [ -f "$ENTERPRISE_DIR/docker-compose.yml" ]; then
-  cd "$ENTERPRISE_DIR"
+if [ -n "$STACK_DIR" ] && [ -f "$STACK_DIR/docker-compose.yml" ]; then
+  cd "$STACK_DIR"
   docker compose -f docker-compose.yml down -v --timeout 10
   echo "AxonFlow stack torn down."
 fi

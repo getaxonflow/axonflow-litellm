@@ -52,6 +52,7 @@ jobs:
           python-version: '3.12'
       - run: pip install ruff
       - run: ruff check .
+      - run: ruff format --check .
 
   build:
     needs: [preflight, lint]
@@ -128,6 +129,12 @@ jobs:
             echo "SKIP: no setup-stack.sh — runtime-e2e tests will skip if stack unavailable"
           fi
 
+      - name: Run fail-closed-on-stack-down
+        run: bash runtime-e2e/fail-closed-on-stack-down/test.sh
+
+      - name: Run fail-open-on-stack-down
+        run: bash runtime-e2e/fail-open-on-stack-down/test.sh
+
       - name: Run sync-completion-policy-fires
         run: bash runtime-e2e/sync-completion-policy-fires/test.sh
 
@@ -136,6 +143,12 @@ jobs:
 
       - name: Run sync-completion-deny
         run: bash runtime-e2e/sync-completion-deny/test.sh
+
+      - name: Run audit-recorded-on-success
+        run: bash runtime-e2e/audit-recorded-on-success/test.sh
+
+      - name: Run sync-completion-hitl-approve
+        run: bash runtime-e2e/sync-completion-hitl-approve/test.sh
 
       - name: Teardown stack
         if: always()

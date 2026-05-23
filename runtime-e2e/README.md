@@ -5,7 +5,7 @@
 These tests verify that `axonflow-litellm` governance actually fires when a real
 `litellm.completion()` call runs against a real AxonFlow stack. They use zero
 mocks, zero stubs, zero HTTP interception — real LiteLLM, real AxonFlow
-docker-compose stack, real policy evaluation, real database rows.
+docker-compose stack, real policy evaluation.
 
 ## Prerequisites
 

@@ -9,8 +9,10 @@ runtime_e2e_skip_if_unavailable
 echo "=== async-completion-policy-fires ==="
 
 MARKER="litellm-async-e2e-$(date +%s)-$RANDOM"
+OUTPUT=$(mktemp -t axonflow-async-e2e.XXXXXX)
+trap 'rm -f "$OUTPUT"' EXIT
 
-python3 -u - "$MARKER" <<'PYEOF'
+python3 -u - "$MARKER" > "$OUTPUT" 2>&1 <<'PYEOF'
 import asyncio
 import sys
 import os
@@ -49,5 +51,12 @@ async def main():
 
 asyncio.run(main())
 PYEOF
+
+cat "$OUTPUT"
+
+if ! grep -q "ASYNC_GOVERNANCE_FIRED=true" "$OUTPUT"; then
+  echo "FAIL: async governance did not fire — ASYNC_GOVERNANCE_FIRED=true not in output"
+  exit 1
+fi
 
 echo "PASS: async-completion-policy-fires"

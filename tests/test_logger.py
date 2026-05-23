@@ -1,0 +1,735 @@
+# Copyright 2026 AxonFlow
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import time
+from datetime import datetime, timedelta
+from typing import Any
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from axonflow_litellm.config import AxonFlowLoggerConfig
+from axonflow_litellm.logger import (
+    ApprovalRejected,
+    ApprovalTimeout,
+    AxonFlowLogger,
+    PolicyDeniedError,
+    _CircuitBreaker,
+    _BreakerState,
+    _extract_query,
+    _infer_provider,
+    _extract_summary,
+    _elapsed_ms,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+PolicyApprovalResult = sys.modules["axonflow"].PolicyApprovalResult
+HITLApprovalRequest = sys.modules["axonflow"].HITLApprovalRequest
+
+
+def _denied_result(reason: str = "content violation", policies: list[str] | None = None):
+    return PolicyApprovalResult(
+        context_id="ctx-denied",
+        approved=False,
+        block_reason=reason,
+        policies=policies or ["pol-1"],
+    )
+
+
+def _approved_result():
+    return PolicyApprovalResult(
+        context_id="ctx-ok",
+        approved=True,
+    )
+
+
+def _require_approval_result():
+    return PolicyApprovalResult(
+        context_id="ctx-approval",
+        approved=False,
+        block_reason="require_approval",
+        policies=["pol-hitl"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Config validation
+# ---------------------------------------------------------------------------
+
+
+class TestConfig:
+    def test_valid_config(self, config: AxonFlowLoggerConfig) -> None:
+        assert config.endpoint == "http://localhost:8080"
+        assert config.client_id == "test-client"
+
+    def test_missing_endpoint(self) -> None:
+        with pytest.raises(ValueError, match="endpoint is required"):
+            AxonFlowLoggerConfig(endpoint="", client_id="x", client_secret="s")
+
+    def test_missing_client_id(self) -> None:
+        with pytest.raises(ValueError, match="client_id is required"):
+            AxonFlowLoggerConfig(endpoint="http://x", client_id="", client_secret="s")
+
+    def test_invalid_timeout(self) -> None:
+        with pytest.raises(ValueError, match="call_timeout_seconds must be positive"):
+            AxonFlowLoggerConfig(
+                endpoint="http://x",
+                client_id="c",
+                client_secret="s",
+                call_timeout_seconds=0,
+            )
+
+    def test_invalid_breaker_threshold(self) -> None:
+        with pytest.raises(ValueError, match="breaker_failure_threshold"):
+            AxonFlowLoggerConfig(
+                endpoint="http://x",
+                client_id="c",
+                client_secret="s",
+                breaker_failure_threshold=0,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Governance: acompletion
+# ---------------------------------------------------------------------------
+
+
+class TestACompletion:
+    @pytest.mark.asyncio
+    async def test_allow_passthrough(self, config, fake_client, make_response) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+
+        assert response is not None
+        fake_client.pre_check.assert_awaited_once()
+        fake_client.audit_llm_call.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_deny_raises_policy_denied(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_denied_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="content violation") as exc_info:
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "bad query"}],
+            )
+
+        assert exc_info.value.policies == ["pol-1"]
+
+    @pytest.mark.asyncio
+    async def test_deny_no_block_reason(self, config, fake_client) -> None:
+        result = PolicyApprovalResult(
+            context_id="ctx-x",
+            approved=False,
+            block_reason=None,
+            policies=[],
+        )
+        fake_client.pre_check = AsyncMock(return_value=result)
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="denied by policy"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "x"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_user_token_forwarded(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+            user_token="jwt-abc",
+        )
+
+        call_kwargs = fake_client.pre_check.call_args
+        assert call_kwargs.kwargs["user_token"] == "jwt-abc"
+
+    @pytest.mark.asyncio
+    async def test_default_user_token(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        call_kwargs = fake_client.pre_check.call_args
+        assert call_kwargs.kwargs["user_token"] == "anonymous"
+
+    @pytest.mark.asyncio
+    async def test_audit_receives_correct_shape(self, config, fake_client, make_response) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        audit_kwargs = fake_client.audit_llm_call.call_args.kwargs
+        assert audit_kwargs["context_id"] == "ctx-ok"
+        assert audit_kwargs["model"] == "gpt-4o"
+        assert audit_kwargs["provider"] == "openai"
+        assert isinstance(audit_kwargs["latency_ms"], int)
+        assert audit_kwargs["latency_ms"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_extra_context_forwarded(self, fake_client) -> None:
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            extra_context={"env": "staging"},
+            tenant_id="t-1",
+        )
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        call_kwargs = fake_client.pre_check.call_args.kwargs
+        assert call_kwargs["context"]["env"] == "staging"
+        assert call_kwargs["context"]["tenant_id"] == "t-1"
+
+
+# ---------------------------------------------------------------------------
+# Governance: sync completion
+# ---------------------------------------------------------------------------
+
+
+class TestSyncCompletion:
+    def test_sync_completion_delegates_to_async(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = logger.completion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert response is not None
+        fake_client.pre_check.assert_awaited_once()
+
+    def test_sync_deny(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_denied_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError):
+            logger.completion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "bad"}],
+            )
+
+
+# ---------------------------------------------------------------------------
+# HITL approval flow
+# ---------------------------------------------------------------------------
+
+
+class TestHITLFlow:
+    @pytest.mark.asyncio
+    async def test_approval_approved(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_require_approval_result())
+        fake_client.create_hitl_request = AsyncMock(
+            return_value=HITLApprovalRequest(request_id="hitl-1", status="pending")
+        )
+        fake_client.get_hitl_request = AsyncMock(
+            return_value=HITLApprovalRequest(request_id="hitl-1", status="approved")
+        )
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "approve me"}],
+        )
+
+        assert response is not None
+        fake_client.create_hitl_request.assert_awaited_once()
+        fake_client.get_hitl_request.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_approval_rejected(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_require_approval_result())
+        fake_client.create_hitl_request = AsyncMock(
+            return_value=HITLApprovalRequest(request_id="hitl-1", status="pending")
+        )
+        fake_client.get_hitl_request = AsyncMock(
+            return_value=HITLApprovalRequest(request_id="hitl-1", status="rejected")
+        )
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(ApprovalRejected):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "approve me"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_approval_expired(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_require_approval_result())
+        fake_client.create_hitl_request = AsyncMock(
+            return_value=HITLApprovalRequest(request_id="hitl-1", status="pending")
+        )
+        fake_client.get_hitl_request = AsyncMock(
+            return_value=HITLApprovalRequest(request_id="hitl-1", status="expired")
+        )
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(ApprovalRejected):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "approve me"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_approval_create_failure_denies(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_require_approval_result())
+        fake_client.create_hitl_request = AsyncMock(side_effect=Exception("server error"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(ApprovalRejected):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "approve me"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_hitl_disabled_denies_fast(self, fake_client) -> None:
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            enable_hitl_polling=False,
+        )
+        fake_client.pre_check = AsyncMock(return_value=_require_approval_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="require_approval"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "approve me"}],
+            )
+
+        fake_client.create_hitl_request.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_hitl_poll_transitions_pending_to_approved(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_require_approval_result())
+        fake_client.create_hitl_request = AsyncMock(
+            return_value=HITLApprovalRequest(request_id="hitl-1", status="pending")
+        )
+        poll_results = [
+            HITLApprovalRequest(request_id="hitl-1", status="pending"),
+            HITLApprovalRequest(request_id="hitl-1", status="pending"),
+            HITLApprovalRequest(request_id="hitl-1", status="approved"),
+        ]
+        fake_client.get_hitl_request = AsyncMock(side_effect=poll_results)
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "approve me"}],
+        )
+
+        assert response is not None
+        assert fake_client.get_hitl_request.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_hitl_consecutive_poll_failures_deny(self, fake_client) -> None:
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            breaker_failure_threshold=2,
+            approval_poll_interval_seconds=0.05,
+            approval_max_wait_seconds=5.0,
+        )
+        fake_client.pre_check = AsyncMock(return_value=_require_approval_result())
+        fake_client.create_hitl_request = AsyncMock(
+            return_value=HITLApprovalRequest(request_id="hitl-1", status="pending")
+        )
+        fake_client.get_hitl_request = AsyncMock(side_effect=Exception("poll error"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(ApprovalRejected):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "approve me"}],
+            )
+
+        assert fake_client.get_hitl_request.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_require_approval_exact_sentinel(self, config, fake_client) -> None:
+        """Substring 'approval' should NOT trigger HITL — exact match only."""
+        result = PolicyApprovalResult(
+            context_id="ctx-x",
+            approved=False,
+            block_reason="needs_approval_from_admin",
+            policies=["pol-x"],
+        )
+        fake_client.pre_check = AsyncMock(return_value=result)
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="needs_approval_from_admin"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "x"}],
+            )
+
+        fake_client.create_hitl_request.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Fail-open / fail-closed
+# ---------------------------------------------------------------------------
+
+
+class TestFailOpen:
+    @pytest.mark.asyncio
+    async def test_pre_check_error_fail_open(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(side_effect=Exception("connection refused"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert response is not None
+
+    @pytest.mark.asyncio
+    async def test_pre_check_error_fail_closed(self, fake_client) -> None:
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            fail_open=False,
+        )
+        fake_client.pre_check = AsyncMock(side_effect=Exception("connection refused"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert response is not None
+
+    @pytest.mark.asyncio
+    async def test_pre_check_timeout_fail_open(self, fake_client) -> None:
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            call_timeout_seconds=0.1,
+        )
+
+        async def slow_pre_check(**kwargs: Any) -> Any:
+            await asyncio.sleep(10)
+
+        fake_client.pre_check = slow_pre_check
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert response is not None
+
+    @pytest.mark.asyncio
+    async def test_audit_error_does_not_break_response(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+        fake_client.audit_llm_call = AsyncMock(side_effect=Exception("audit failed"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert response is not None
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker
+# ---------------------------------------------------------------------------
+
+
+class TestCircuitBreaker:
+    @pytest.mark.asyncio
+    async def test_breaker_opens_after_threshold(self) -> None:
+        breaker = _CircuitBreaker(failure_threshold=3, recovery_seconds=10.0)
+
+        for _ in range(3):
+            assert await breaker.acquire() is True
+            await breaker.record_failure()
+
+        assert breaker._state is _BreakerState.OPEN
+        assert await breaker.acquire() is False
+
+    @pytest.mark.asyncio
+    async def test_breaker_recovers_after_window(self) -> None:
+        breaker = _CircuitBreaker(failure_threshold=2, recovery_seconds=0.1)
+
+        for _ in range(2):
+            await breaker.acquire()
+            await breaker.record_failure()
+
+        assert breaker._state is _BreakerState.OPEN
+        await asyncio.sleep(0.15)
+
+        assert await breaker.acquire() is True
+        assert breaker._state is _BreakerState.HALF_OPEN
+
+    @pytest.mark.asyncio
+    async def test_breaker_half_open_one_probe(self) -> None:
+        breaker = _CircuitBreaker(failure_threshold=1, recovery_seconds=0.05)
+
+        await breaker.acquire()
+        await breaker.record_failure()
+
+        await asyncio.sleep(0.1)
+
+        assert await breaker.acquire() is True
+        assert await breaker.acquire() is False
+
+    @pytest.mark.asyncio
+    async def test_breaker_half_open_success_closes(self) -> None:
+        breaker = _CircuitBreaker(failure_threshold=1, recovery_seconds=0.05)
+
+        await breaker.acquire()
+        await breaker.record_failure()
+
+        await asyncio.sleep(0.1)
+
+        await breaker.acquire()
+        await breaker.record_success()
+
+        assert breaker._state is _BreakerState.CLOSED
+        assert await breaker.acquire() is True
+
+    @pytest.mark.asyncio
+    async def test_breaker_half_open_failure_reopens(self) -> None:
+        breaker = _CircuitBreaker(failure_threshold=1, recovery_seconds=0.05)
+
+        await breaker.acquire()
+        await breaker.record_failure()
+
+        await asyncio.sleep(0.1)
+
+        await breaker.acquire()
+        await breaker.record_failure()
+
+        assert breaker._state is _BreakerState.OPEN
+
+    @pytest.mark.asyncio
+    async def test_breaker_skips_during_open(self, config, fake_client) -> None:
+        config.breaker_failure_threshold = 1
+        fake_client.pre_check = AsyncMock(side_effect=Exception("fail"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+
+        await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "1"}],
+        )
+
+        assert fake_client.pre_check.await_count == 1
+
+        await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "2"}],
+        )
+
+        assert fake_client.pre_check.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Callback hooks (audit-only mode)
+# ---------------------------------------------------------------------------
+
+
+class TestCallbackHooks:
+    @pytest.mark.asyncio
+    async def test_async_log_pre_api_call_does_pre_check(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        kwargs: dict[str, Any] = {"litellm_params": {"metadata": {}}}
+
+        await logger.async_log_pre_api_call("gpt-4o", [{"role": "user", "content": "hi"}], kwargs)
+
+        assert kwargs.get("_axonflow_context_id") == "ctx-ok"
+
+    @pytest.mark.asyncio
+    async def test_async_log_pre_api_call_skips_governed(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        kwargs: dict[str, Any] = {
+            "litellm_params": {"metadata": {"_axonflow_governed": True}},
+        }
+
+        await logger.async_log_pre_api_call("gpt-4o", [{"role": "user", "content": "hi"}], kwargs)
+
+        fake_client.pre_check.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_async_log_success_event_audits(self, config, fake_client, make_response) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+        fake_client.audit_llm_call = AsyncMock()
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+
+        kwargs: dict[str, Any] = {
+            "litellm_params": {"metadata": {}},
+            "model": "gpt-4o",
+        }
+        await logger.async_log_pre_api_call("gpt-4o", [{"role": "user", "content": "hi"}], kwargs)
+
+        now = datetime.now()
+        await logger.async_log_success_event(
+            kwargs, make_response(), now - timedelta(seconds=1), now
+        )
+
+        fake_client.audit_llm_call.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_async_log_success_skips_without_context_id(self, config, fake_client, make_response) -> None:
+        logger = AxonFlowLogger.from_client(fake_client, config)
+
+        kwargs: dict[str, Any] = {"litellm_params": {"metadata": {}}, "model": "gpt-4o"}
+        now = datetime.now()
+        await logger.async_log_success_event(kwargs, make_response(), now, now)
+
+        fake_client.audit_llm_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_async_log_failure_event_audits(self, config, fake_client) -> None:
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+        fake_client.audit_llm_call = AsyncMock()
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+
+        kwargs: dict[str, Any] = {
+            "litellm_params": {"metadata": {}},
+            "model": "gpt-4o",
+        }
+        await logger.async_log_pre_api_call("gpt-4o", [{"role": "user", "content": "hi"}], kwargs)
+
+        error = Exception("LLM provider error")
+        now = datetime.now()
+        await logger.async_log_failure_event(
+            kwargs, error, now - timedelta(seconds=2), now
+        )
+
+        fake_client.audit_llm_call.assert_awaited_once()
+        audit_kwargs = fake_client.audit_llm_call.call_args.kwargs
+        assert "[ERROR]" in audit_kwargs["response_summary"]
+
+    @pytest.mark.asyncio
+    async def test_sync_hooks_are_noops_in_async_context(self, config, fake_client) -> None:
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        logger.log_pre_api_call("gpt-4o", [], {})
+        logger.log_success_event({}, None, None, None)
+        logger.log_failure_event({}, None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# from_client ownership
+# ---------------------------------------------------------------------------
+
+
+class TestClientOwnership:
+    @pytest.mark.asyncio
+    async def test_from_client_does_not_close(self, config, fake_client) -> None:
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        await logger.aclose()
+        assert logger._client is None or not logger._owns_client
+
+    @pytest.mark.asyncio
+    async def test_owned_client_is_closed(self, config) -> None:
+        logger = AxonFlowLogger(config)
+        client = await logger._get_client()
+        await logger.aclose()
+        assert logger._client is None
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+
+class TestHelpers:
+    def test_extract_query_last_user_message(self) -> None:
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "What is AI?"},
+        ]
+        assert _extract_query(messages) == "What is AI?"
+
+    def test_extract_query_multimodal(self) -> None:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image"},
+                    {"type": "image_url", "image_url": {"url": "..."}},
+                ],
+            }
+        ]
+        assert _extract_query(messages) == "Describe this image"
+
+    def test_extract_query_empty(self) -> None:
+        assert _extract_query([]) == ""
+        assert _extract_query(None) == ""
+
+    def test_extract_query_truncates(self) -> None:
+        messages = [{"role": "user", "content": "x" * 5000}]
+        assert len(_extract_query(messages)) == 4000
+
+    def test_infer_provider(self) -> None:
+        assert _infer_provider("gpt-4o") == "openai"
+        assert _infer_provider("claude-sonnet-4-6") == "anthropic"
+        assert _infer_provider("gemini-2.0-flash") == "google"
+        assert _infer_provider("o1-mini") == "openai"
+        assert _infer_provider("command-r-plus") == "cohere"
+        assert _infer_provider("unknown-model") == "unknown"
+
+    def test_extract_summary(self, make_response) -> None:
+        resp = make_response(content="Test response here")
+        assert _extract_summary(resp) == "Test response here"
+
+    def test_extract_summary_empty(self) -> None:
+        assert _extract_summary(None) == ""
+        assert _extract_summary(object()) == ""
+
+    def test_elapsed_ms(self) -> None:
+        start = datetime(2026, 1, 1, 0, 0, 0)
+        end = datetime(2026, 1, 1, 0, 0, 1, 500000)
+        assert _elapsed_ms(start, end) == 1500
+
+    def test_elapsed_ms_bad_input(self) -> None:
+        assert _elapsed_ms(None, None) == 0

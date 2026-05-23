@@ -166,6 +166,7 @@ jobs:
         run: bash runtime-e2e/audit-recorded-on-success/test.sh
 
       - name: Run sync-completion-hitl-approve
+        if: env.AXONFLOW_STACK_TIER == 'enterprise'
         run: bash runtime-e2e/sync-completion-hitl-approve/test.sh
 
       - name: Wall-time floor sanity check

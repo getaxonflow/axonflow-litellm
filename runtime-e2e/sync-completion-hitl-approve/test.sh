@@ -2,7 +2,8 @@
 # Verify: HITL approval plumbing works end-to-end.
 #
 # HITL queue is an Enterprise feature — this test requires an Enterprise stack.
-# On community stacks, exits 1 with a clear message (not a silent skip).
+# On community stacks, exits 1. The release workflow conditionally runs this
+# test only when AXONFLOW_STACK_TIER=enterprise.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../_lib/common.sh"
@@ -10,19 +11,16 @@ require_stack
 
 echo "=== sync-completion-hitl-approve ==="
 
-# Check if HITL is enabled on this stack
+# Verify HITL is enabled — fail hard if not
 HITL_STATUS=$(curl -sf "${AXONFLOW_ENDPOINT}/api/v1/hitl/status" 2>/dev/null || echo "")
 HITL_ENABLED=$(echo "$HITL_STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('enabled',False))" 2>/dev/null || echo "false")
 
 if [ "$HITL_ENABLED" != "True" ] && [ "$HITL_ENABLED" != "true" ]; then
-  echo "SKIP-ENTERPRISE: HITL is disabled on this stack (community mode)"
+  echo "FAIL: HITL is disabled on this stack (community mode)"
   echo "  HITL status: $HITL_STATUS"
   echo "  This test requires an Enterprise stack with HITL enabled."
-  echo "  The HITL polling integration is verified by unit tests (test_logger.py)."
-  # Exit 0 — this is a DOCUMENTED skip for a feature that structurally
-  # cannot run on the community stack (Enterprise-only endpoint).
-  # The unit tests cover the HITL polling logic thoroughly.
-  exit 0
+  echo "  Run with AXONFLOW_STACK_TIER=enterprise or skip this test in the workflow."
+  exit 1
 fi
 
 require_psql

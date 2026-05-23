@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Verify: litellm.acompletion() (async) with AxonFlowLogger registered as callback
-# fires pre_check against the real AxonFlow stack and records a decision.
+# Verify: logger.acompletion() (async governance wrapper) fires pre_check
+# against the real AxonFlow stack and records a gateway_contexts row.
 #
-# Assertion: queries GET /api/v1/decisions after the completion and verifies
-# at least one decision exists (proving pre_check ran on the async path).
+# NOTE: litellm.acompletion() with callbacks does NOT fire async_log_pre_api_call
+# (LiteLLM only calls the sync hook for pre-call). For async governance, users
+# MUST use logger.acompletion() directly.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../_lib/common.sh"
 require_stack
+require_psql
 
 echo "=== async-completion-policy-fires ==="
 
@@ -15,11 +17,13 @@ MARKER="litellm-async-e2e-$(date +%s)-$RANDOM"
 OUTPUT=$(mktemp -t axonflow-async-e2e.XXXXXX)
 trap 'rm -f "$OUTPUT"' EXIT
 
+BEFORE_COUNT=$(run_psql -c "SELECT count(*) FROM gateway_contexts")
+echo "gateway_contexts rows before: $BEFORE_COUNT"
+
 python3 -u - "$MARKER" > "$OUTPUT" 2>&1 <<'PYEOF'
 import asyncio
 import sys
 import os
-import litellm
 from axonflow_litellm import AxonFlowLogger, AxonFlowLoggerConfig
 
 marker = sys.argv[1]
@@ -31,10 +35,8 @@ async def main():
         client_secret=os.environ.get("AXONFLOW_CLIENT_SECRET", ""),
     ))
 
-    litellm.callbacks = [logger]
-
     try:
-        response = await litellm.acompletion(
+        response = await logger.acompletion(
             model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": f"Say exactly: {marker}"}],
             max_tokens=20,
@@ -62,21 +64,14 @@ if ! grep -qE "ASYNC_COMPLETION=(success|denied_by_policy)" "$OUTPUT"; then
   exit 1
 fi
 
-# Verify a decision was recorded
-sleep 2
-DECISIONS_RESPONSE=$(curl -sf "${AXONFLOW_ENDPOINT}/api/v1/decisions?limit=5" 2>&1 || echo "")
-echo "Decisions API response: $DECISIONS_RESPONSE"
+sleep 1
+AFTER_COUNT=$(run_psql -c "SELECT count(*) FROM gateway_contexts")
+echo "gateway_contexts rows after: $AFTER_COUNT"
 
-DECISION_COUNT=$(echo "$DECISIONS_RESPONSE" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-decisions = data.get('decisions', data.get('data', []))
-print(len(decisions) if isinstance(decisions, list) else 0)
-" 2>/dev/null || echo "0")
-
-if [ "$DECISION_COUNT" -lt 1 ]; then
-  echo "FAIL: no decisions found after async completion — pre_check may not have fired"
+if [ "$AFTER_COUNT" -le "$BEFORE_COUNT" ]; then
+  echo "FAIL: no new gateway_contexts row created — pre_check did not fire on async path"
+  echo "  Before: $BEFORE_COUNT, After: $AFTER_COUNT"
   exit 1
 fi
 
-echo "PASS: async-completion-policy-fires — pre_check fired, $DECISION_COUNT decision(s) recorded"
+echo "PASS: async-completion-policy-fires — pre_check created new gateway_contexts row ($BEFORE_COUNT → $AFTER_COUNT)"

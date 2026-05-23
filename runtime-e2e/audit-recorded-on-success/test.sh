@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# Verify: after a successful logger.completion(), an audit/decision row
-# is recorded in the AxonFlow stack.
+# Verify: after a successful logger.completion(), an audit row is recorded
+# in the AxonFlow llm_call_audits table.
 #
-# Assertion: queries GET /api/v1/decisions and verifies a row exists
-# with the expected context_id from the pre-check.
+# Assertion: queries llm_call_audits via psql to verify a new row was created.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../_lib/common.sh"
 require_stack
+require_psql
 
 echo "=== audit-recorded-on-success ==="
 
 MARKER="audit-e2e-$(date +%s)-$RANDOM"
 OUTPUT=$(mktemp -t audit-e2e.XXXXXX)
 trap 'rm -f "$OUTPUT"' EXIT
+
+BEFORE_COUNT=$(run_psql -c "SELECT count(*) FROM llm_call_audits")
+echo "llm_call_audits rows before: $BEFORE_COUNT"
 
 python3 -u - "$MARKER" > "$OUTPUT" 2>&1 <<'PYEOF'
 import sys
@@ -50,30 +53,19 @@ if ! grep -q "AUDIT_COMPLETION=success" "$OUTPUT"; then
   exit 1
 fi
 
-# Query decisions API for a recent decision — the pre_check should have created one
-sleep 2
-DECISIONS_RESPONSE=$(curl -sf "${AXONFLOW_ENDPOINT}/api/v1/decisions?limit=5" 2>&1 || echo "")
+# Wait for audit row to be written (async, may take a moment)
+sleep 3
+AFTER_COUNT=$(run_psql -c "SELECT count(*) FROM llm_call_audits")
+echo "llm_call_audits rows after: $AFTER_COUNT"
 
-if [ -z "$DECISIONS_RESPONSE" ]; then
-  echo "FAIL: could not query /api/v1/decisions — no response"
+if [ "$AFTER_COUNT" -le "$BEFORE_COUNT" ]; then
+  echo "FAIL: no new llm_call_audits row created after successful completion"
+  echo "  Before: $BEFORE_COUNT, After: $AFTER_COUNT"
   exit 1
 fi
 
-echo "Decisions API response: $DECISIONS_RESPONSE"
+# Show the most recent audit row as evidence
+LATEST_ROW=$(run_psql -c "SELECT audit_id, context_id, provider, model, prompt_tokens, completion_tokens, latency_ms FROM llm_call_audits ORDER BY created_at DESC LIMIT 1")
+echo "Latest audit row: $LATEST_ROW"
 
-DECISION_COUNT=$(echo "$DECISIONS_RESPONSE" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-decisions = data.get('decisions', data.get('data', []))
-if isinstance(decisions, list):
-    print(len(decisions))
-else:
-    print(0)
-" 2>/dev/null || echo "0")
-
-if [ "$DECISION_COUNT" -lt 1 ]; then
-  echo "FAIL: expected at least 1 decision row, got $DECISION_COUNT"
-  exit 1
-fi
-
-echo "PASS: audit-recorded-on-success — $DECISION_COUNT decision(s) found in AxonFlow after completion"
+echo "PASS: audit-recorded-on-success — new llm_call_audits row created ($BEFORE_COUNT → $AFTER_COUNT)"

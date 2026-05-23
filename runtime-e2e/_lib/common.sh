@@ -52,13 +52,12 @@ create_deny_policy() {
     -d "{
       \"name\": \"${name}\",
       \"description\": \"E2E test deny policy\",
-      \"category\": \"custom\",
+      \"category\": \"security-sqli\",
       \"tier\": \"tenant\",
       \"pattern\": \"${pattern}\",
       \"action\": \"block\",
       \"severity\": \"critical\",
-      \"enabled\": true,
-      \"tags\": [\"e2e-test\"]
+      \"enabled\": true
     }"
 }
 
@@ -70,13 +69,12 @@ create_require_approval_policy() {
     -d "{
       \"name\": \"${name}\",
       \"description\": \"E2E test require_approval policy\",
-      \"category\": \"custom\",
+      \"category\": \"security-sqli\",
       \"tier\": \"tenant\",
       \"pattern\": \"${pattern}\",
       \"action\": \"require_approval\",
       \"severity\": \"high\",
-      \"enabled\": true,
-      \"tags\": [\"e2e-test\", \"hitl\"]
+      \"enabled\": true
     }"
 }
 

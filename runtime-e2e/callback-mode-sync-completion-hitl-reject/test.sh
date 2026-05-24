@@ -20,15 +20,16 @@ if [ -z "$POLICY_ID" ]; then
 fi
 echo "Created policy: $POLICY_ID"
 
-# Verify sentinel
-SENTINEL_BR=$(axonflow_api POST "/api/policy/pre-check" \
-  -d "{\"user_token\":\"${AXONFLOW_USER_TOKEN}\",\"query\":\"${MARKER}\",\"client_id\":\"${AXONFLOW_CLIENT_ID}\",\"context\":{}}" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin).get('block_reason',''))" 2>/dev/null || echo "")
+
+# Wait for policy engine to reload and verify sentinel
+SENTINEL_BR=$(wait_for_policy_active "$MARKER" "require_approval")
+
 if [ "$SENTINEL_BR" != "require_approval" ]; then
-  echo "FAIL: sentinel not set — got '$SENTINEL_BR'. Platform fix needed."
+  echo "FAIL: sentinel not set after 10s — got '$SENTINEL_BR'"
   delete_policy "$POLICY_ID"
   exit 1
 fi
+echo "Sentinel verified: block_reason=$SENTINEL_BR"
 
 cleanup() { delete_policy "$POLICY_ID"; echo "Cleaned up"; }
 trap cleanup EXIT
@@ -36,7 +37,7 @@ trap cleanup EXIT
 OUTPUT=$(mktemp -t hitl-reject-e2e.XXXXXX)
 
 # Background rejector
-python3 -u - > /dev/null 2>&1 <<PYEOF &
+python3 -u - > /dev/null 2>&1 <<'PYEOF' &
 import time, os, requests
 endpoint = os.environ["AXONFLOW_ENDPOINT"]
 auth = os.environ["AXONFLOW_AUTH"]
@@ -60,7 +61,7 @@ for _ in range(60):
 PYEOF
 REJECTOR_PID=$!
 
-python3 -u - "$MARKER" > "$OUTPUT" 2>&1 <<PYEOF
+python3 -u - "$MARKER" > "$OUTPUT" 2>&1 <<'PYEOF'
 import sys, os
 from axonflow_litellm import AxonFlowLogger, AxonFlowLoggerConfig, ApprovalRejected, ApprovalTimeout
 

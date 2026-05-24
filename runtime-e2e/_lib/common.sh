@@ -102,13 +102,35 @@ create_require_approval_policy() {
     -d "{
       \"name\": \"${name}\",
       \"description\": \"E2E test require_approval policy\",
-      \"category\": \"security-sqli\",
+      \"category\": \"sensitive-data\",
       \"tier\": \"tenant\",
       \"pattern\": \"${pattern}\",
       \"action\": \"require_approval\",
       \"severity\": \"high\",
       \"enabled\": true
     }"
+}
+
+wait_for_policy_active() {
+  local query="$1"
+  local expected_block_reason="${2:-}"
+  local br=""
+  local i
+  for i in $(seq 1 10); do
+    local raw_response
+    raw_response=$(axonflow_api POST "/api/policy/pre-check" \
+      -d "{\"user_token\":\"${AXONFLOW_USER_TOKEN}\",\"query\":\"${query}\",\"client_id\":\"${AXONFLOW_CLIENT_ID}\",\"context\":{}}" 2>/dev/null) || raw_response=""
+    br=$(echo "$raw_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('block_reason',''))" 2>/dev/null) || br=""
+    if [ -n "$br" ]; then
+      if [ -z "$expected_block_reason" ] || [ "$br" = "$expected_block_reason" ]; then
+        echo "$br"
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  echo ""
+  return 0
 }
 
 delete_policy() {

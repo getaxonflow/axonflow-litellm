@@ -25,7 +25,8 @@ if [ -z "$POLICY_ID" ]; then
   echo "FAIL: could not create deny policy — response: $POLICY_RESPONSE"
   exit 1
 fi
-echo "Created deny policy: $POLICY_ID"
+echo "Created policy: $POLICY_ID"
+sleep 2  # wait for shared policy engine to reload
 cleanup() { delete_policy "$POLICY_ID"; echo "Cleaned up policy $POLICY_ID"; }
 trap cleanup EXIT
 

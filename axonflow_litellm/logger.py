@@ -612,7 +612,7 @@ class AxonFlowLogger(CustomLogger):
         return await client.create_hitl_request(
             request=HITLCreateInput(
                 client_id=self._config.client_id,
-                user_id=user_token if user_token != "anonymous" else None,
+                user_id=user_token[:255] if user_token != "anonymous" else None,
                 original_query=query[:4000],
                 request_type=self._config.request_type,
                 request_context={"model": model},

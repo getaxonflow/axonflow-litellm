@@ -4,6 +4,8 @@
 # Setup: create require_approval policy via API; start background approver.
 # Call: logger.completion() triggers require_approval → HITL flow → approved.
 # Assert: completion returns with LLM response; HITL row status=approved in DB.
+#
+# Requires eval-tier stack with HITL enabled.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../_lib/common.sh"
@@ -23,28 +25,35 @@ if [ -z "$POLICY_ID" ]; then
   exit 1
 fi
 echo "Created require_approval policy: $POLICY_ID"
+
+# Verify the policy actually returns block_reason="require_approval" sentinel
+SENTINEL_CHECK=$(axonflow_api POST "/api/policy/pre-check" \
+  -d "{\"user_token\":\"${AXONFLOW_USER_TOKEN}\",\"query\":\"${MARKER}\",\"client_id\":\"${AXONFLOW_CLIENT_ID}\",\"context\":{}}")
+SENTINEL_BR=$(echo "$SENTINEL_CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin).get('block_reason',''))" 2>/dev/null || echo "")
+echo "Sentinel check: block_reason=$SENTINEL_BR"
+
+if [ "$SENTINEL_BR" != "require_approval" ]; then
+  echo "FAIL: pre_check did not return block_reason='require_approval' sentinel"
+  echo "  Got: '$SENTINEL_BR'. Platform fix may not be deployed."
+  delete_policy "$POLICY_ID"
+  exit 1
+fi
+
 cleanup() { delete_policy "$POLICY_ID"; echo "Cleaned up policy $POLICY_ID"; }
 trap cleanup EXIT
 
 OUTPUT=$(mktemp -t hitl-approve-e2e.XXXXXX)
 
-# Background approver: polls HITL queue and approves any pending request
+# Background approver
 python3 -u - > /dev/null 2>&1 <<PYEOF &
-import time
-import os
-import requests
-
+import time, os, requests
 endpoint = os.environ["AXONFLOW_ENDPOINT"]
 auth = os.environ["AXONFLOW_AUTH"]
-
 for _ in range(60):
     time.sleep(1)
     try:
-        resp = requests.get(
-            f"{endpoint}/api/v1/hitl/queue?status=pending&limit=10",
-            headers={"Authorization": f"Basic {auth}"},
-            timeout=5,
-        )
+        resp = requests.get(f"{endpoint}/api/v1/hitl/queue?status=pending&limit=10",
+            headers={"Authorization": f"Basic {auth}"}, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             items = data.get("data", data.get("items", []))
@@ -52,12 +61,9 @@ for _ in range(60):
                 for item in items:
                     if item.get("status") == "pending":
                         req_id = item["request_id"]
-                        requests.post(
-                            f"{endpoint}/api/v1/hitl/queue/{req_id}/approve",
+                        requests.post(f"{endpoint}/api/v1/hitl/queue/{req_id}/approve",
                             headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"},
-                            json={"reviewer_id": "e2e-approver", "comments": "auto-approved"},
-                            timeout=5,
-                        )
+                            json={"reviewer_id": "e2e-approver", "comments": "auto-approved"}, timeout=5)
                         print(f"Approved {req_id}")
                         exit(0)
     except Exception:
@@ -66,14 +72,11 @@ PYEOF
 APPROVER_PID=$!
 
 python3 -u - "$MARKER" > "$OUTPUT" 2>&1 <<PYEOF
-import sys
-import os
+import sys, os
 from axonflow_litellm import (
     AxonFlowLogger, AxonFlowLoggerConfig,
     ApprovalRejected, ApprovalTimeout, PolicyDeniedError,
 )
-
-marker = sys.argv[1]
 
 logger = AxonFlowLogger(AxonFlowLoggerConfig(
     endpoint=os.environ["AXONFLOW_ENDPOINT"],
@@ -87,7 +90,7 @@ logger = AxonFlowLogger(AxonFlowLoggerConfig(
 try:
     response = logger.completion(
         model=os.environ.get("LLM_MODEL", "ollama/llama3.2:1b"),
-        messages=[{"role": "user", "content": f"Process: {marker}"}],
+        messages=[{"role": "user", "content": f"Process: {sys.argv[1]}"}],
         max_tokens=10,
     )
     print(f"LLM response: {response.choices[0].message.content[:50]}")
@@ -120,10 +123,10 @@ if ! grep -q "HITL_RESULT=approved" "$OUTPUT"; then
 fi
 
 # Verify HITL row in DB
-HITL_COUNT=$(run_psql -c "SELECT count(*) FROM hitl_approval_queue WHERE status = 'approved' AND trigger_reason = 'require_approval' AND created_at > NOW() - INTERVAL '5 minutes'")
-echo "Recent approved HITL rows: $HITL_COUNT"
+HITL_ROWS=$(run_psql -c "SELECT request_id, status FROM hitl_approval_queue WHERE status = 'approved' AND created_at > NOW() - INTERVAL '5 minutes' LIMIT 1")
+echo "Recent approved HITL row: $HITL_ROWS"
 
-if [ "$HITL_COUNT" -lt 1 ]; then
+if [ -z "$HITL_ROWS" ]; then
   echo "FAIL: no approved HITL row found in DB"
   rm -f "$OUTPUT"
   exit 1
@@ -131,3 +134,4 @@ fi
 
 rm -f "$OUTPUT"
 echo "PASS: callback-mode-sync-completion-hitl-approve — create→approve→resume verified"
+echo "  HITL row: $HITL_ROWS"

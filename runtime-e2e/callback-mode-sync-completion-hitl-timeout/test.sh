@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Verify: HITL timeout raises ApprovalTimeout when nobody approves/rejects.
+# Requires eval-tier stack with HITL enabled.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../_lib/common.sh"
@@ -18,6 +19,17 @@ if [ -z "$POLICY_ID" ]; then
   exit 1
 fi
 echo "Created policy: $POLICY_ID"
+
+# Verify sentinel
+SENTINEL_BR=$(axonflow_api POST "/api/policy/pre-check" \
+  -d "{\"user_token\":\"${AXONFLOW_USER_TOKEN}\",\"query\":\"${MARKER}\",\"client_id\":\"${AXONFLOW_CLIENT_ID}\",\"context\":{}}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('block_reason',''))" 2>/dev/null || echo "")
+if [ "$SENTINEL_BR" != "require_approval" ]; then
+  echo "FAIL: sentinel not set — got '$SENTINEL_BR'. Platform fix needed."
+  delete_policy "$POLICY_ID"
+  exit 1
+fi
+
 cleanup() { delete_policy "$POLICY_ID"; echo "Cleaned up"; }
 trap cleanup EXIT
 

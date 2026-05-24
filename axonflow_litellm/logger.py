@@ -463,6 +463,8 @@ class AxonFlowLogger(CustomLogger):
             asyncio.get_running_loop()
         except RuntimeError:
             try:
+                self._client_lock = asyncio.Lock()
+                self._breaker._lock = asyncio.Lock()
                 asyncio.run(coro)
             except Exception:
                 _log.debug("Sync hook failed (non-blocking)", exc_info=True)

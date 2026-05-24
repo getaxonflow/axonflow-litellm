@@ -105,6 +105,15 @@ When registered via `litellm.callbacks`, sync hooks delegate to their async coun
 
 If sync hooks are invoked inside a running event loop (unusual — e.g., sync callbacks from an async framework), a one-time `RuntimeWarning` is emitted directing you to `acompletion()`.
 
+### Sync callback mode caveats
+
+In sync callback mode (`litellm.callbacks = [logger]` + `litellm.completion()`), each callback hook creates an ephemeral `asyncio` event loop via `asyncio.run()`. Pre-check (governance) and post-LLM audit both fire and write to AxonFlow. However:
+
+- **Audit write failures are logged at WARNING level** and do not raise to the caller (fail-open by default). If AxonFlow is temporarily unreachable during the audit phase, the LLM response is still returned but the audit row may be missing.
+- **Each hook creates a new event loop**, so connection pooling is not shared across hooks within the same LLM call. This is slightly less efficient than the governance wrapper path.
+
+For strict audit guarantees (every LLM call audited, failure = exception), use `logger.completion()` or `logger.acompletion()` instead of the callback registration path.
+
 ## Exceptions
 
 | Exception | When |

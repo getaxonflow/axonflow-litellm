@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.3] - 2026-05-24
+
+### Fixed
+
+- **HITL user_id field overflow** — JWT user tokens (>255 chars) caused
+  `pq: value too long for type character varying(255)` on HITL queue
+  insertion. Fixed: truncate `user_id` to 255 characters.
+- **Sync callback audit completeness** — added runtime-e2e test
+  (`callback-mode-sync-audit-row-written`) proving that `log_success_event`
+  via the sync `asyncio.run()` bridge actually writes a `llm_call_audits`
+  row, not just a `gateway_contexts` pre-check row.
+- **Unquoted bash heredocs** — Python f-strings inside unquoted `<<PYEOF`
+  heredocs were expanded by bash, breaking HITL test scripts.
+- **Telemetry leak in CI** — release workflow docker-compose ran without
+  `AXONFLOW_TELEMETRY=off`, causing the stack to emit telemetry from
+  GitHub Actions runners.
+
+### Added
+
+- 9 new callback-mode runtime-e2e tests (total: 16), all using
+  `litellm.callbacks = [logger]` + `litellm.completion()` (the real
+  customer pattern), with DB assertions via `psql`:
+  - `callback-mode-sync-completion-policy-fires` — pre_check fires on sync
+  - `callback-mode-async-completion-policy-fires` — governance wrapper async
+  - `callback-mode-sync-completion-deny` — audit-only deny logged
+  - `callback-mode-audit-recorded-on-failure` — pre_check fires on LLM error
+  - `callback-mode-sync-audit-row-written` — post-LLM audit row verified
+  - `callback-mode-sync-completion-hitl-approve` — full HITL create→approve→resume
+  - `callback-mode-sync-completion-hitl-reject` — HITL rejection path
+  - `callback-mode-sync-completion-hitl-timeout` — HITL client-side timeout
+  - `callback-mode-sequential-calls-breaker-stable` — 5 sequential calls
+  - `callback-mode-streaming-completion-governed` — streaming completion
+- `wait_for_policy_active()` helper with retry loop for policy engine reload
+- `hitl_approver.py` background worker for HITL approve/reject automation
+- README "Sync callback mode caveats" section documenting audit semantics
+
+### Known limitations
+
+- **HITL reject/timeout tests flaky in sequential runs** — when the HITL
+  approve test runs immediately before reject or timeout, the policy engine
+  may not reload the new policy within the 15-second retry window. Root
+  cause: engine-side reload race after rapid DELETE→CREATE between tests.
+  Workaround: run HITL tests individually or add a longer delay between
+  policy teardown and creation. Does not affect production use (policies
+  are not created/deleted in rapid succession).
+
+### Platform fixes (companion PRs)
+
+- `gateway_handlers.go`: HITL `require_approval` sentinel not set when
+  policy also triggers `Blocked` (enterprise PR merged).
+- `sensitive-data` category required for HITL policies (detection config
+  overrides `security-sqli` to `block`).
+
 ## [1.0.2] - 2026-05-24
 
 ### Fixed

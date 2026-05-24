@@ -112,6 +112,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LLM_MODEL: ollama/llama3.2
+      AXONFLOW_TELEMETRY: "off"
     steps:
       - uses: actions/checkout@v4
 
@@ -139,7 +140,7 @@ jobs:
       - name: Start AxonFlow stack
         run: |
           cd /tmp/axonflow
-          docker compose -f docker-compose.yml up -d --wait --timeout 120
+          AXONFLOW_TELEMETRY=off docker compose -f docker-compose.yml up -d --wait --timeout 120
           echo "Waiting for agent health..."
           for i in $(seq 1 60); do
             if curl -sf --max-time 5 http://localhost:8080/health &>/dev/null; then

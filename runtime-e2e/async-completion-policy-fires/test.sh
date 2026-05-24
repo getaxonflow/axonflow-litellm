@@ -33,6 +33,7 @@ async def main():
         endpoint=os.environ["AXONFLOW_ENDPOINT"],
         client_id=os.environ["AXONFLOW_CLIENT_ID"],
         client_secret=os.environ.get("AXONFLOW_CLIENT_SECRET", ""),
+    default_user_token=os.environ.get("AXONFLOW_USER_TOKEN", "anonymous"),
     ))
 
     try:

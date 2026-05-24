@@ -132,14 +132,14 @@ jobs:
       - name: Run fail-open-on-stack-down (no stack needed)
         run: bash runtime-e2e/fail-open-on-stack-down/test.sh
 
-      - name: Clone AxonFlow platform for docker-compose
+      - name: Clone AxonFlow community repo for docker-compose
         run: |
-          git clone --depth 1 https://${{ secrets.GH_SYNC_TOKEN }}@github.com/getaxonflow/axonflow-enterprise.git /tmp/axonflow-enterprise
+          git clone --depth 1 https://github.com/getaxonflow/axonflow.git /tmp/axonflow
 
-      - name: Start AxonFlow stack with Ollama
+      - name: Start AxonFlow stack
         run: |
-          cd /tmp/axonflow-enterprise
-          docker compose -f docker-compose.yml -f docker-compose.community-saas.yml up -d --wait --timeout 180
+          cd /tmp/axonflow
+          docker compose -f docker-compose.yml up -d --wait --timeout 120
           echo "Waiting for agent health..."
           for i in $(seq 1 60); do
             if curl -sf --max-time 5 http://localhost:8080/health &>/dev/null; then
@@ -149,6 +149,14 @@ jobs:
             sleep 3
           done
           curl -sf http://localhost:8080/health || (echo "FAIL: stack not healthy after 180s" && exit 1)
+
+      - name: Install and start Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull llama3.2
+          echo "Ollama ready with llama3.2"
 
       - name: Install psql for DB assertions
         run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
@@ -182,8 +190,8 @@ jobs:
       - name: Teardown stack
         if: always()
         run: |
-          if [ -d /tmp/axonflow-enterprise ]; then
-            cd /tmp/axonflow-enterprise
+          if [ -d /tmp/axonflow ]; then
+            cd /tmp/axonflow
             docker compose -f docker-compose.yml down -v --timeout 10 || true
           fi
 

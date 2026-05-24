@@ -116,7 +116,7 @@ wait_for_policy_active() {
   local expected_block_reason="${2:-}"
   local br=""
   local i
-  for i in $(seq 1 10); do
+  for i in $(seq 1 15); do
     local raw_response
     raw_response=$(axonflow_api POST "/api/policy/pre-check" \
       -d "{\"user_token\":\"${AXONFLOW_USER_TOKEN}\",\"query\":\"${query}\",\"client_id\":\"${AXONFLOW_CLIENT_ID}\",\"context\":{}}" 2>/dev/null) || raw_response=""

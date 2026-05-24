@@ -111,7 +111,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      LLM_MODEL: ollama/llama3.2
     steps:
       - uses: actions/checkout@v4
 
@@ -136,19 +136,19 @@ jobs:
         run: |
           git clone --depth 1 https://${{ secrets.GH_SYNC_TOKEN }}@github.com/getaxonflow/axonflow-enterprise.git /tmp/axonflow-enterprise
 
-      - name: Start AxonFlow stack
+      - name: Start AxonFlow stack with Ollama
         run: |
           cd /tmp/axonflow-enterprise
-          docker compose -f docker-compose.yml up -d --wait --timeout 120
+          docker compose -f docker-compose.yml -f docker-compose.community-saas.yml up -d --wait --timeout 180
           echo "Waiting for agent health..."
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             if curl -sf --max-time 5 http://localhost:8080/health &>/dev/null; then
               echo "AxonFlow stack healthy"
               break
             fi
-            sleep 2
+            sleep 3
           done
-          curl -sf http://localhost:8080/health || (echo "FAIL: stack not healthy after 60s" && exit 1)
+          curl -sf http://localhost:8080/health || (echo "FAIL: stack not healthy after 180s" && exit 1)
 
       - name: Install psql for DB assertions
         run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client

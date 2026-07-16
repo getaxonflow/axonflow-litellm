@@ -43,6 +43,23 @@ class ApprovalTimeout(PolicyDeniedError):
     """Raised when a HITL approval request times out waiting for a decision."""
 
 
+def _is_platform_rejection(exc: Exception) -> bool:
+    """True when ``exc`` is a definitive 4xx rejection from AxonFlow.
+
+    ``AuthenticationError`` (401 — bad client credentials or a rejected
+    ``user_token``) and ``PolicyViolationError`` (403 — e.g. tenant
+    mismatch) mean the platform is healthy and refused the request; they
+    are never availability degradation.  Imported lazily to match the
+    module's deferred ``axonflow`` imports.
+    """
+    try:
+        from axonflow.exceptions import AuthenticationError, PolicyViolationError
+    except ImportError:  # pragma: no cover — every supported SDK ships these
+        return False
+
+    return isinstance(exc, (AuthenticationError, PolicyViolationError))
+
+
 # ---------------------------------------------------------------------------
 # Circuit breaker
 # ---------------------------------------------------------------------------
@@ -204,6 +221,7 @@ class AxonFlowLogger(CustomLogger):
         coro_factory: Any,
         *,
         fail_open: bool = True,
+        reject_closed: bool = False,
     ) -> Any:
         """Run ``coro_factory()`` with timeout + circuit breaker.
 
@@ -213,20 +231,32 @@ class AxonFlowLogger(CustomLogger):
         The breaker probe slot is always released even on
         ``asyncio.CancelledError`` (``BaseException`` subclass), preventing
         a permanent slot leak that would disable the breaker.
+
+        ``reject_closed=True`` (the pre-check gate) makes a definitive
+        platform rejection (4xx — bad credentials, rejected ``user_token``,
+        tenant mismatch) raise :class:`PolicyDeniedError` regardless of
+        ``fail_open``.  ``fail_open`` exists for platform *degradation*
+        (unreachable, timeout, 5xx); a rejection is a healthy platform
+        saying no, and treating it as degradation silently drops governance
+        on every call — the platform audit trail records ``blocked`` while
+        the LLM call proceeds.  A rejection also does NOT count as a breaker
+        failure: the breaker guards availability, and letting rejections
+        trip it open would resume the silent fail-open skip after
+        ``breaker_failure_threshold`` calls.
         """
         if not await self._breaker.acquire():
             _log.debug("axonflow.%s skipped: circuit open", op_name)
             if not fail_open:
                 raise PolicyDeniedError("AxonFlow unreachable (circuit open) — fail_open=False")
             return None
-        outcome = "failure"
+        breaker_failed = True
         try:
             try:
                 result = await asyncio.wait_for(
                     coro_factory(),
                     timeout=self._config.call_timeout_seconds,
                 )
-                outcome = "success"
+                breaker_failed = False
                 return result
             except asyncio.TimeoutError:
                 _log.warning(
@@ -239,6 +269,19 @@ class AxonFlowLogger(CustomLogger):
                     raise PolicyDeniedError("AxonFlow timed out — fail_open=False")
                 return None
             except Exception as exc:
+                if reject_closed and _is_platform_rejection(exc):
+                    breaker_failed = False
+                    _log.error(
+                        "axonflow.%s rejected by the platform: %s — failing closed. "
+                        "Check client credentials and user_token: enterprise/evaluation "
+                        "deployments validate user_token and reject the "
+                        "default_user_token placeholder %r (mint a per-user token via "
+                        "the admin token API — see README).",
+                        op_name,
+                        exc,
+                        self._config.default_user_token,
+                    )
+                    raise PolicyDeniedError(f"AxonFlow rejected the request: {exc}") from exc
                 _log.warning(
                     "axonflow.%s failed: %s; %s",
                     op_name,
@@ -249,10 +292,10 @@ class AxonFlowLogger(CustomLogger):
                     raise
                 return None
         finally:
-            if outcome == "success":
-                await asyncio.shield(self._breaker.record_success())
-            else:
+            if breaker_failed:
                 await asyncio.shield(self._breaker.record_failure())
+            else:
+                await asyncio.shield(self._breaker.record_success())
 
     # ----- Governance wrappers ---------------------------------------------
 
@@ -293,6 +336,7 @@ class AxonFlowLogger(CustomLogger):
             "pre_check",
             lambda: self._do_pre_check(token, query, context),
             fail_open=self._config.fail_open,
+            reject_closed=True,
         )
 
         if pre_check_result is not None and not pre_check_result.approved:
@@ -366,6 +410,7 @@ class AxonFlowLogger(CustomLogger):
             result = await self._call_with_guard(
                 "pre_check_audit",
                 lambda: self._do_pre_check(token, query, context),
+                reject_closed=True,
             )
             if result and result.context_id:
                 kwargs[_KWARGS_CONTEXT_ID] = result.context_id

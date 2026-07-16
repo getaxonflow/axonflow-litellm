@@ -518,6 +518,104 @@ class TestFailOpen:
 
 
 # ---------------------------------------------------------------------------
+# Platform rejections fail closed (#2946)
+# ---------------------------------------------------------------------------
+
+AuthenticationError = sys.modules["axonflow.exceptions"].AuthenticationError
+PolicyViolationError = sys.modules["axonflow.exceptions"].PolicyViolationError
+
+
+class TestPlatformRejectionFailsClosed:
+    """A 4xx rejection from AxonFlow must never fail open.
+
+    Pins the live #2946 finding: against an enterprise/evaluation
+    deployment, ``default_user_token="anonymous"`` is rejected by
+    ``/api/policy/pre-check`` with 401 — and the default ``fail_open=True``
+    used to swallow that into an ungoverned LLM call while the platform
+    audit trail recorded ``blocked``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rejected_default_token_fails_closed_despite_fail_open(
+        self, config, fake_client
+    ) -> None:
+        # The exact enterprise "anonymous" case: pre-check 401s, fail_open=True.
+        assert config.fail_open is True
+        fake_client.pre_check = AsyncMock(side_effect=AuthenticationError("Invalid credentials"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="rejected"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_policy_violation_fails_closed_despite_fail_open(
+        self, config, fake_client
+    ) -> None:
+        fake_client.pre_check = AsyncMock(side_effect=PolicyViolationError("Tenant mismatch"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="Tenant mismatch"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejections_do_not_trip_breaker_into_ungoverned(self, fake_client) -> None:
+        # Rejections must not count as breaker failures: with threshold=2 an
+        # open breaker would skip pre-check entirely and (fail_open=True)
+        # resume the silent ungoverned pass-through after two calls.
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            breaker_failure_threshold=2,
+        )
+        fake_client.pre_check = AsyncMock(side_effect=AuthenticationError("Invalid credentials"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        for _ in range(5):
+            with pytest.raises(PolicyDeniedError):
+                await logger.acompletion(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+
+        # Every call reached the platform — none was skipped by an open breaker.
+        assert fake_client.pre_check.await_count == 5
+
+    @pytest.mark.asyncio
+    async def test_transport_error_still_fails_open(self, config, fake_client) -> None:
+        # The availability contract is unchanged: a transport error under
+        # fail_open=True still bypasses governance transparently.
+        fake_client.pre_check = AsyncMock(side_effect=Exception("connection refused"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert response is not None
+
+    @pytest.mark.asyncio
+    async def test_callback_mode_rejection_is_swallowed(self, config, fake_client) -> None:
+        # Audit-only callback mode cannot block by design (LiteLLM swallows
+        # callback exceptions) — the rejection must not escape the hook, and
+        # no context id is recorded.
+        fake_client.pre_check = AsyncMock(side_effect=AuthenticationError("Invalid credentials"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        kwargs: dict[str, Any] = {}
+        await logger.async_log_pre_api_call("gpt-4o", [{"role": "user", "content": "hi"}], kwargs)
+
+        assert "_axonflow_context_id" not in kwargs
+
+
+# ---------------------------------------------------------------------------
 # Circuit breaker
 # ---------------------------------------------------------------------------
 

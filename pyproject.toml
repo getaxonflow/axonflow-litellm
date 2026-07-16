@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "axonflow-litellm"
-version = "1.0.3"
+version = "1.0.4"
 description = "AxonFlow governance integration for LiteLLM"
 readme = "README.md"
 license = {text = "MIT"}

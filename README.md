@@ -71,7 +71,7 @@ In this mode, every LLM call is recorded to AxonFlow for audit trail. Policy den
 | `endpoint` | *(required)* | AxonFlow agent URL |
 | `client_id` | *(required)* | AxonFlow client identifier |
 | `client_secret` | `""` | AxonFlow client secret |
-| `default_user_token` | `"anonymous"` | Token for policy evaluation when none provided |
+| `default_user_token` | `"anonymous"` | Token for policy evaluation when none provided — accepted only by community-mode deployments; see [User tokens](#user-tokens-community-vs-enterprise) |
 | `tenant_id` | `None` | AxonFlow tenant identifier |
 | `fail_open` | `True` | Allow LLM calls when AxonFlow is unreachable |
 | `call_timeout_seconds` | `5.0` | Per-hook timeout for AxonFlow API calls |
@@ -81,6 +81,37 @@ In this mode, every LLM call is recorded to AxonFlow for audit trail. Policy den
 | `approval_poll_interval_seconds` | `2.0` | Polling interval for HITL status |
 | `approval_max_wait_seconds` | `300.0` | Maximum wait for HITL decision |
 | `extra_context` | `{}` | Additional context sent with every pre-check |
+
+### User tokens: community vs. enterprise
+
+What `user_token` must be depends on the AxonFlow deployment mode:
+
+- **Community / community-SaaS** — the token is not validated. The
+  `default_user_token="anonymous"` placeholder works out of the box.
+- **Enterprise / evaluation** — the platform validates `user_token` on
+  `/api/policy/pre-check` and rejects both absent and invalid tokens
+  (including the `"anonymous"` placeholder) with 401. Pass a real
+  per-user token on every call (or set `default_user_token` to one):
+
+  ```python
+  response = await logger.acompletion(
+      model="gpt-4o",
+      messages=[...],
+      user_token=minted_token,  # per-user token minted by your admin
+  )
+  ```
+
+  Admins mint per-user tokens via the customer-portal admin API
+  (`POST /api/v1/admin/organizations/{org_id}/user-tokens`) or use an
+  OIDC access token from the tenant's configured IdP — see the
+  [per-user token provisioning guide](https://github.com/getaxonflow/axonflow-enterprise/blob/main/docs/enterprise/per-user-token-provisioning.md).
+  The audit trail then attributes each LLM call to that user.
+
+A platform **rejection** (401/403 — bad credentials, rejected
+`user_token`, tenant mismatch) always raises `PolicyDeniedError`,
+regardless of `fail_open`. `fail_open` covers *availability* only: a
+healthy platform refusing the request is a governance verdict, not an
+outage, and proceeding would silently skip governance on every call.
 
 ### Fail-Open vs. Fail-Closed
 

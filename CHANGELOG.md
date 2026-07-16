@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.4] - 2026-07-17
+
+### Fixed
+
+- **Platform rejections no longer fail open** (getaxonflow/axonflow-enterprise#2946) —
+  a 4xx rejection from AxonFlow (`AuthenticationError` on 401,
+  `PolicyViolationError` on 403) during pre-check now raises
+  `PolicyDeniedError` regardless of `fail_open`. Previously, against an
+  enterprise/evaluation deployment — which validates `user_token` on
+  `/api/policy/pre-check` and rejects the `default_user_token`
+  placeholder `"anonymous"` — the default `fail_open=True` swallowed the
+  401 and every LLM call proceeded **ungoverned** while the platform
+  audit trail recorded `blocked`. `fail_open` now covers availability
+  only (unreachable / timeout / 5xx), matching the Go SDK's
+  fail-closed-on-4xx posture. Community-mode deployments are unaffected
+  (they do not validate `user_token`).
+- Rejections no longer count as circuit-breaker failures — the breaker
+  guards availability; letting deterministic 4xx rejections trip it open
+  used to resume the silent governance skip after
+  `breaker_failure_threshold` calls.
+- With `fail_open=False`, a platform rejection now raises
+  `PolicyDeniedError` (was: the raw `AuthenticationError` /
+  `PolicyViolationError`), so callers can catch one exception type for
+  every governance stop. The original exception is chained as
+  `__cause__`.
+
+### Documentation
+
+- README: new "User tokens: community vs. enterprise" section — the
+  `"anonymous"` placeholder only works on community-mode deployments;
+  enterprise/evaluation require a real per-user token (admin mint API or
+  OIDC), with a pointer to the per-user token provisioning guide.
+
 ## [1.0.3] - 2026-05-24
 
 ### Fixed

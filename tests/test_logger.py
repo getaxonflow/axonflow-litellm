@@ -522,6 +522,7 @@ class TestFailOpen:
 # ---------------------------------------------------------------------------
 
 AuthenticationError = sys.modules["axonflow.exceptions"].AuthenticationError
+BudgetExceededError = sys.modules["axonflow.exceptions"].BudgetExceededError
 PolicyViolationError = sys.modules["axonflow.exceptions"].PolicyViolationError
 
 
@@ -613,6 +614,62 @@ class TestPlatformRejectionFailsClosed:
         await logger.async_log_pre_api_call("gpt-4o", [{"role": "user", "content": "hi"}], kwargs)
 
         assert "_axonflow_context_id" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_budget_block_fails_closed_despite_fail_open(self, config, fake_client) -> None:
+        # 402 is a deliberate block verdict on the same endpoint (the platform
+        # writes a `blocked` audit row) — it must fail closed exactly like
+        # 401/403, not be swallowed as degradation.
+        fake_client.pre_check = AsyncMock(side_effect=BudgetExceededError("Budget exceeded"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="Budget exceeded"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejection_with_fail_closed_raises_policy_denied_with_cause(
+        self, fake_client
+    ) -> None:
+        # Under fail_open=False a rejection raises the normalized
+        # PolicyDeniedError (not the raw SDK error), with the original
+        # exception chained as __cause__.
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            fail_open=False,
+        )
+        original = AuthenticationError("Invalid credentials")
+        fake_client.pre_check = AsyncMock(side_effect=original)
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="rejected") as exc_info:
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert exc_info.value.__cause__ is original
+
+    @pytest.mark.asyncio
+    async def test_audit_auth_error_does_not_discard_response(self, config, fake_client) -> None:
+        # reject_closed applies to the pre-check gate only: a 401 from the
+        # post-LLM audit call must never discard the already-obtained response.
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+        fake_client.audit_llm_call = AsyncMock(
+            side_effect=AuthenticationError("Invalid credentials")
+        )
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert response is not None
 
 
 # ---------------------------------------------------------------------------

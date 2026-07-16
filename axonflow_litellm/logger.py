@@ -47,17 +47,22 @@ def _is_platform_rejection(exc: Exception) -> bool:
     """True when ``exc`` is a definitive 4xx rejection from AxonFlow.
 
     ``AuthenticationError`` (401 — bad client credentials or a rejected
-    ``user_token``) and ``PolicyViolationError`` (403 — e.g. tenant
-    mismatch) mean the platform is healthy and refused the request; they
-    are never availability degradation.  Imported lazily to match the
-    module's deferred ``axonflow`` imports.
+    ``user_token``), ``BudgetExceededError`` (402 — a block-action budget
+    verdict) and ``PolicyViolationError`` (403 — e.g. tenant mismatch)
+    mean the platform is healthy and refused the request; they are never
+    availability degradation.  Imported lazily to match the module's
+    deferred ``axonflow`` imports.
     """
     try:
-        from axonflow.exceptions import AuthenticationError, PolicyViolationError
+        from axonflow.exceptions import (
+            AuthenticationError,
+            BudgetExceededError,
+            PolicyViolationError,
+        )
     except ImportError:  # pragma: no cover — every supported SDK ships these
         return False
 
-    return isinstance(exc, (AuthenticationError, PolicyViolationError))
+    return isinstance(exc, (AuthenticationError, BudgetExceededError, PolicyViolationError))
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +239,8 @@ class AxonFlowLogger(CustomLogger):
 
         ``reject_closed=True`` (the pre-check gate) makes a definitive
         platform rejection (4xx — bad credentials, rejected ``user_token``,
-        tenant mismatch) raise :class:`PolicyDeniedError` regardless of
-        ``fail_open``.  ``fail_open`` exists for platform *degradation*
+        budget block, tenant mismatch) raise :class:`PolicyDeniedError`
+        regardless of ``fail_open``.  ``fail_open`` exists for platform *degradation*
         (unreachable, timeout, 5xx); a rejection is a healthy platform
         saying no, and treating it as degradation silently drops governance
         on every call — the platform audit trail records ``blocked`` while
@@ -271,15 +276,17 @@ class AxonFlowLogger(CustomLogger):
             except Exception as exc:
                 if reject_closed and _is_platform_rejection(exc):
                     breaker_failed = False
+                    # Never log token material here — default_user_token may be
+                    # a real minted credential, and rejections fire exactly when
+                    # one has been rotated/revoked.
                     _log.error(
                         "axonflow.%s rejected by the platform: %s — failing closed. "
                         "Check client credentials and user_token: enterprise/evaluation "
-                        "deployments validate user_token and reject the "
-                        "default_user_token placeholder %r (mint a per-user token via "
-                        "the admin token API — see README).",
+                        "deployments validate user_token and reject placeholders like "
+                        "the default 'anonymous' (mint a per-user token via the admin "
+                        "token API — see README).",
                         op_name,
                         exc,
-                        self._config.default_user_token,
                     )
                     raise PolicyDeniedError(f"AxonFlow rejected the request: {exc}") from exc
                 _log.warning(

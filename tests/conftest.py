@@ -123,6 +123,10 @@ def _install_axonflow_stub() -> None:
     class AuthenticationError(AxonFlowError):
         pass
 
+    class BudgetExceededError(AxonFlowError):
+        def __init__(self, message: str, **kwargs: Any) -> None:
+            super().__init__(message)
+
     class PolicyViolationError(AxonFlowError):
         def __init__(self, message: str, **kwargs: Any) -> None:
             super().__init__(message)
@@ -201,6 +205,7 @@ def _install_axonflow_stub() -> None:
 
     exceptions_mod.AxonFlowError = AxonFlowError  # type: ignore[attr-defined]
     exceptions_mod.AuthenticationError = AuthenticationError  # type: ignore[attr-defined]
+    exceptions_mod.BudgetExceededError = BudgetExceededError  # type: ignore[attr-defined]
     exceptions_mod.PolicyViolationError = PolicyViolationError  # type: ignore[attr-defined]
 
     sys.modules["axonflow"] = axonflow_mod

@@ -107,11 +107,13 @@ What `user_token` must be depends on the AxonFlow deployment mode:
   [per-user token provisioning guide](https://github.com/getaxonflow/axonflow-enterprise/blob/main/docs/enterprise/per-user-token-provisioning.md).
   The audit trail then attributes each LLM call to that user.
 
-A platform **rejection** (401/403 — bad credentials, rejected
-`user_token`, tenant mismatch) always raises `PolicyDeniedError`,
-regardless of `fail_open`. `fail_open` covers *availability* only: a
-healthy platform refusing the request is a governance verdict, not an
-outage, and proceeding would silently skip governance on every call.
+A platform **rejection** (401/402/403 — bad credentials, rejected
+`user_token`, budget block, tenant mismatch) raises `PolicyDeniedError`
+whenever the pre-check reaches the platform, regardless of `fail_open`.
+`fail_open` covers *availability* only: a healthy platform refusing the
+request is a governance verdict, not an outage, and proceeding would
+silently skip governance on every call. (In audit-only callback mode the
+error is logged but cannot block — a LiteLLM callback limitation.)
 
 ### Fail-Open vs. Fail-Closed
 

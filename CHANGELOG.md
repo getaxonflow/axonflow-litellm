@@ -8,16 +8,17 @@ All notable changes to this project will be documented in this file.
 
 - **Platform rejections no longer fail open** (getaxonflow/axonflow-enterprise#2946) —
   a 4xx rejection from AxonFlow (`AuthenticationError` on 401,
-  `PolicyViolationError` on 403) during pre-check now raises
-  `PolicyDeniedError` regardless of `fail_open`. Previously, against an
-  enterprise/evaluation deployment — which validates `user_token` on
-  `/api/policy/pre-check` and rejects the `default_user_token`
-  placeholder `"anonymous"` — the default `fail_open=True` swallowed the
-  401 and every LLM call proceeded **ungoverned** while the platform
-  audit trail recorded `blocked`. `fail_open` now covers availability
-  only (unreachable / timeout / 5xx), matching the Go SDK's
-  fail-closed-on-4xx posture. Community-mode deployments are unaffected
-  (they do not validate `user_token`).
+  `BudgetExceededError` on 402, `PolicyViolationError` on 403) during
+  pre-check now raises `PolicyDeniedError` regardless of `fail_open`.
+  Previously, against an enterprise/evaluation deployment — which
+  validates `user_token` on `/api/policy/pre-check` and rejects the
+  `default_user_token` placeholder `"anonymous"` — the default
+  `fail_open=True` swallowed the 401 and every LLM call proceeded
+  **ungoverned** while the platform audit trail recorded `blocked`; the
+  same swallow applied to 402 block-action budget verdicts. `fail_open`
+  now covers availability only (unreachable / timeout / 5xx), matching
+  the Go SDK's fail-closed-on-4xx posture. Community-mode deployments
+  are unaffected (they do not validate `user_token`).
 - Rejections no longer count as circuit-breaker failures — the breaker
   guards availability; letting deterministic 4xx rejections trip it open
   used to resume the silent governance skip after

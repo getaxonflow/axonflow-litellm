@@ -555,6 +555,8 @@ class TestPlatformRejectionFailsClosed:
     async def test_policy_violation_fails_closed_despite_fail_open(
         self, config, fake_client
     ) -> None:
+        # The message is arbitrary — the assertion pins the plugin's wrapping
+        # and propagation, not any specific platform string.
         fake_client.pre_check = AsyncMock(side_effect=PolicyViolationError("Tenant mismatch"))
 
         logger = AxonFlowLogger.from_client(fake_client, config)
@@ -653,6 +655,56 @@ class TestPlatformRejectionFailsClosed:
             )
 
         assert exc_info.value.__cause__ is original
+
+    @pytest.mark.asyncio
+    async def test_audit_rejection_never_trips_breaker(self, fake_client) -> None:
+        # Rejections on NON-gated ops (post-LLM audit) must not count as
+        # breaker failures either: N concurrent audit 401s would otherwise
+        # open the breaker and resume the fail-open pre-check skip.
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            breaker_failure_threshold=1,
+        )
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+        fake_client.audit_llm_call = AsyncMock(
+            side_effect=AuthenticationError("Invalid credentials")
+        )
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        for _ in range(3):
+            response = await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+            assert response is not None
+
+        # Breaker never opened: every pre-check reached the platform.
+        assert fake_client.pre_check.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_image_only_message_is_governed_via_placeholder(
+        self, config, fake_client
+    ) -> None:
+        # An image-only message extracts an empty query, which the platform
+        # 400s (→ silent fail-open skip). It must be governed under the
+        # non-text placeholder instead.
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": "https://x/img.png"}}],
+                }
+            ],
+        )
+
+        assert response is not None
+        assert fake_client.pre_check.call_args.kwargs["query"] == "[non-text content]"
 
     @pytest.mark.asyncio
     async def test_audit_auth_error_does_not_discard_response(self, config, fake_client) -> None:

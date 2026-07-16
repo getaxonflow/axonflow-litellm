@@ -19,10 +19,17 @@ All notable changes to this project will be documented in this file.
   now covers availability only (unreachable / timeout / 5xx), matching
   the Go SDK's fail-closed-on-4xx posture. Community-mode deployments
   are unaffected (they do not validate `user_token`).
-- Rejections no longer count as circuit-breaker failures — the breaker
-  guards availability; letting deterministic 4xx rejections trip it open
-  used to resume the silent governance skip after
-  `breaker_failure_threshold` calls.
+- Rejections no longer count as circuit-breaker failures **on any
+  guarded op** (pre-check, audit, HITL) — the breaker guards
+  availability; letting deterministic 401/402/403 rejections trip it
+  open used to resume the silent governance skip after
+  `breaker_failure_threshold` calls (e.g. a burst of concurrent post-LLM
+  audit 401s could open it and skip subsequent pre-checks).
+- **Empty-query pre-checks no longer skip governance** — an image-only
+  or empty message extracted an empty `query`, which the platform
+  rejects with 400; under `fail_open=True` that error was swallowed and
+  the call proceeded ungoverned. Such calls are now governed under the
+  `[non-text content]` placeholder query.
 - With `fail_open=False`, a platform rejection now raises
   `PolicyDeniedError` (was: the raw `AuthenticationError` /
   `PolicyViolationError`), so callers can catch one exception type for
@@ -33,8 +40,9 @@ All notable changes to this project will be documented in this file.
 
 - README: new "User tokens: community vs. enterprise" section — the
   `"anonymous"` placeholder only works on community-mode deployments;
-  enterprise/evaluation require a real per-user token (admin mint API or
-  OIDC), with a pointer to the per-user token provisioning guide.
+  enterprise/evaluation require a real admin-minted (HS256) per-user
+  token (the pre-check plane rejects OIDC/RS256 tokens), with a pointer
+  to the per-user token provisioning guide.
 
 ## [1.0.3] - 2026-05-24
 

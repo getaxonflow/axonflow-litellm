@@ -20,6 +20,11 @@ _METADATA_CONTEXT_ID = "_axonflow_context_id"
 _METADATA_GOVERNED = "_axonflow_governed"
 _KWARGS_CONTEXT_ID = "_axonflow_context_id"
 
+# Pre-check requires a non-empty query (the platform 400s otherwise, which
+# would silently skip governance under fail_open). Image-only or empty
+# messages are governed under this placeholder instead.
+_NON_TEXT_QUERY = "[non-text content]"
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -274,8 +279,13 @@ class AxonFlowLogger(CustomLogger):
                     raise PolicyDeniedError("AxonFlow timed out — fail_open=False")
                 return None
             except Exception as exc:
-                if reject_closed and _is_platform_rejection(exc):
+                rejection = _is_platform_rejection(exc)
+                if rejection:
+                    # A platform rejection proves availability whichever op saw
+                    # it — never a breaker failure (an open breaker would resume
+                    # the silent fail-open governance skip).
                     breaker_failed = False
+                if reject_closed and rejection:
                     # Never log token material here — default_user_token may be
                     # a real minted credential, and rejections fire exactly when
                     # one has been rotated/revoked.
@@ -333,7 +343,7 @@ class AxonFlowLogger(CustomLogger):
         model = kwargs.get("model", "unknown")
         messages = kwargs.get("messages", [])
         token = user_token or self._config.default_user_token
-        query = _extract_query(messages)
+        query = _extract_query(messages) or _NON_TEXT_QUERY
 
         context: dict[str, Any] = {**self._config.extra_context}
         if self._config.tenant_id:
@@ -408,7 +418,7 @@ class AxonFlowLogger(CustomLogger):
             return
 
         token = self._config.default_user_token
-        query = _extract_query(messages)
+        query = _extract_query(messages) or _NON_TEXT_QUERY
         context: dict[str, Any] = {**self._config.extra_context}
         if self._config.tenant_id:
             context["tenant_id"] = self._config.tenant_id

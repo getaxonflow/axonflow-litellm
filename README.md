@@ -102,10 +102,11 @@ What `user_token` must be depends on the AxonFlow deployment mode:
   ```
 
   Admins mint per-user tokens via the customer-portal admin API
-  (`POST /api/v1/admin/organizations/{org_id}/user-tokens`) or use an
-  OIDC access token from the tenant's configured IdP — see the
+  (`POST /api/v1/admin/organizations/{org_id}/user-tokens`) — see the
   [per-user token provisioning guide](https://github.com/getaxonflow/axonflow-enterprise/blob/main/docs/enterprise/per-user-token-provisioning.md).
-  The audit trail then attributes each LLM call to that user.
+  Admin-minted (HS256) tokens only: the pre-check plane pins the accepted
+  algorithm to HS256, so tenant-OIDC access tokens (RS256) are rejected
+  there. The audit trail then attributes each LLM call to that user.
 
 A platform **rejection** (401/402/403 — bad credentials, rejected
 `user_token`, budget block, tenant mismatch) raises `PolicyDeniedError`

@@ -518,6 +518,213 @@ class TestFailOpen:
 
 
 # ---------------------------------------------------------------------------
+# Platform rejections fail closed (#2946)
+# ---------------------------------------------------------------------------
+
+AuthenticationError = sys.modules["axonflow.exceptions"].AuthenticationError
+BudgetExceededError = sys.modules["axonflow.exceptions"].BudgetExceededError
+PolicyViolationError = sys.modules["axonflow.exceptions"].PolicyViolationError
+
+
+class TestPlatformRejectionFailsClosed:
+    """A 4xx rejection from AxonFlow must never fail open.
+
+    Pins the live #2946 finding: against an enterprise/evaluation
+    deployment, ``default_user_token="anonymous"`` is rejected by
+    ``/api/policy/pre-check`` with 401 — and the default ``fail_open=True``
+    used to swallow that into an ungoverned LLM call while the platform
+    audit trail recorded ``blocked``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rejected_default_token_fails_closed_despite_fail_open(
+        self, config, fake_client
+    ) -> None:
+        # The exact enterprise "anonymous" case: pre-check 401s, fail_open=True.
+        assert config.fail_open is True
+        fake_client.pre_check = AsyncMock(side_effect=AuthenticationError("Invalid credentials"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="rejected"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_policy_violation_fails_closed_despite_fail_open(
+        self, config, fake_client
+    ) -> None:
+        # The message is arbitrary — the assertion pins the plugin's wrapping
+        # and propagation, not any specific platform string.
+        fake_client.pre_check = AsyncMock(side_effect=PolicyViolationError("Tenant mismatch"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="Tenant mismatch"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejections_do_not_trip_breaker_into_ungoverned(self, fake_client) -> None:
+        # Rejections must not count as breaker failures: with threshold=2 an
+        # open breaker would skip pre-check entirely and (fail_open=True)
+        # resume the silent ungoverned pass-through after two calls.
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            breaker_failure_threshold=2,
+        )
+        fake_client.pre_check = AsyncMock(side_effect=AuthenticationError("Invalid credentials"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        for _ in range(5):
+            with pytest.raises(PolicyDeniedError):
+                await logger.acompletion(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+
+        # Every call reached the platform — none was skipped by an open breaker.
+        assert fake_client.pre_check.await_count == 5
+
+    @pytest.mark.asyncio
+    async def test_transport_error_still_fails_open(self, config, fake_client) -> None:
+        # The availability contract is unchanged: a transport error under
+        # fail_open=True still bypasses governance transparently.
+        fake_client.pre_check = AsyncMock(side_effect=Exception("connection refused"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert response is not None
+
+    @pytest.mark.asyncio
+    async def test_callback_mode_rejection_is_swallowed(self, config, fake_client) -> None:
+        # Audit-only callback mode cannot block by design (LiteLLM swallows
+        # callback exceptions) — the rejection must not escape the hook, and
+        # no context id is recorded.
+        fake_client.pre_check = AsyncMock(side_effect=AuthenticationError("Invalid credentials"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        kwargs: dict[str, Any] = {}
+        await logger.async_log_pre_api_call("gpt-4o", [{"role": "user", "content": "hi"}], kwargs)
+
+        assert "_axonflow_context_id" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_budget_block_fails_closed_despite_fail_open(self, config, fake_client) -> None:
+        # 402 is a deliberate block verdict on the same endpoint (the platform
+        # writes a `blocked` audit row) — it must fail closed exactly like
+        # 401/403, not be swallowed as degradation.
+        fake_client.pre_check = AsyncMock(side_effect=BudgetExceededError("Budget exceeded"))
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="Budget exceeded"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejection_with_fail_closed_raises_policy_denied_with_cause(
+        self, fake_client
+    ) -> None:
+        # Under fail_open=False a rejection raises the normalized
+        # PolicyDeniedError (not the raw SDK error), with the original
+        # exception chained as __cause__.
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            fail_open=False,
+        )
+        original = AuthenticationError("Invalid credentials")
+        fake_client.pre_check = AsyncMock(side_effect=original)
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="rejected") as exc_info:
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert exc_info.value.__cause__ is original
+
+    @pytest.mark.asyncio
+    async def test_audit_rejection_never_trips_breaker(self, fake_client) -> None:
+        # Rejections on NON-gated ops (post-LLM audit) must not count as
+        # breaker failures either: N concurrent audit 401s would otherwise
+        # open the breaker and resume the fail-open pre-check skip.
+        config = AxonFlowLoggerConfig(
+            endpoint="http://localhost:8080",
+            client_id="c",
+            client_secret="s",
+            breaker_failure_threshold=1,
+        )
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+        fake_client.audit_llm_call = AsyncMock(
+            side_effect=AuthenticationError("Invalid credentials")
+        )
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        for _ in range(3):
+            response = await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+            assert response is not None
+
+        # Breaker never opened: every pre-check reached the platform.
+        assert fake_client.pre_check.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_image_only_message_is_governed_via_placeholder(
+        self, config, fake_client
+    ) -> None:
+        # An image-only message extracts an empty query, which the platform
+        # 400s (→ silent fail-open skip). It must be governed under the
+        # non-text placeholder instead.
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": "https://x/img.png"}}],
+                }
+            ],
+        )
+
+        assert response is not None
+        assert fake_client.pre_check.call_args.kwargs["query"] == "[non-text content]"
+
+    @pytest.mark.asyncio
+    async def test_audit_auth_error_does_not_discard_response(self, config, fake_client) -> None:
+        # reject_closed applies to the pre-check gate only: a 401 from the
+        # post-LLM audit call must never discard the already-obtained response.
+        fake_client.pre_check = AsyncMock(return_value=_approved_result())
+        fake_client.audit_llm_call = AsyncMock(
+            side_effect=AuthenticationError("Invalid credentials")
+        )
+
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert response is not None
+
+
+# ---------------------------------------------------------------------------
 # Circuit breaker
 # ---------------------------------------------------------------------------
 

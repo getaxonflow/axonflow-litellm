@@ -170,6 +170,16 @@ LiteLLM is LLM-completion-focused. For MCP tool governance, use [AxonFlow's MCP 
 - `litellm` >= 1.40
 - `axonflow` >= 8.2.0
 
+## Telemetry
+
+This integration declares itself on the AxonFlow SDK's existing anonymous heartbeat, so aggregate adoption figures can tell LiteLLM-governed usage apart from bare SDK usage. Without it the two are indistinguishable: both report the same `sdk`, the same `sdk_version` and the same endpoint.
+
+**It adds no network request.** `adapter:litellm` rides the `features` array of the heartbeat the SDK already sends — there is no second ping, no second endpoint, and no new configuration surface. The declaration happens once, immediately before the AxonFlow client is constructed, so it reaches the very first heartbeat.
+
+What is and is not collected: **the string `litellm`, and nothing else.** No prompts, no completions, no model names, no user identities, no configuration. Everything else on the heartbeat is the SDK's own — see the [AxonFlow Python SDK's telemetry section](https://github.com/getaxonflow/axonflow-sdk-python#telemetry) for the full field list and the opt-out.
+
+`AXONFLOW_TELEMETRY=off` suppresses the heartbeat, and this declaration with it. An SDK older than 9.3.0 simply has nothing to declare to; the integration works normally either way.
+
 ## License
 
 MIT

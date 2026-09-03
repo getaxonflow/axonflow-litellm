@@ -129,6 +129,54 @@ class _CircuitBreaker:
             self._probe_in_flight = False
 
 
+def _declare_adapter() -> None:
+    """Declare LiteLLM on the SDK's telemetry heartbeat.
+
+    Without this, an application governed through this integration is
+    indistinguishable from bare SDK use on every telemetry dimension — same
+    ``sdk``, same ``sdk_version``, same endpoint. See
+    ``axonflow.telemetry.register_adapter``: it adds ``adapter:litellm`` to the
+    ``features`` array of the heartbeat the SDK already sends, performs **no
+    I/O**, and adds no request of its own.
+
+    CALLED IMMEDIATELY BEFORE THE CLIENT IS BUILT, not at module import, and the
+    position is doing two jobs.
+
+    First, an import says this package is INSTALLED; reaching here says it is
+    actually being USED to govern a call, and only the second is adoption
+    signal. Importing ``axonflow_litellm`` in a test or a linter would otherwise
+    declare LiteLLM adoption that never happened.
+
+    Second, the SDK's heartbeat fires on the client's FIRST OUTBOUND REQUEST
+    (axonflow-enterprise#3682), so a declaration made after that request rides
+    the next heartbeat instead. Registering here — inside the lock, immediately
+    before ``AxonFlow(...)`` and therefore before any call through it — puts it
+    on the very first ping.
+
+    It runs at most once per logger: the caller holds ``_client_lock`` and has
+    already checked ``self._client is None``. Repeat calls would be harmless
+    anyway, since the registry is a set.
+
+    THE IMPORT IS GUARDED, and narrowly. ``pyproject.toml`` floors the SDK at
+    ``axonflow>=8.2.0``, and ``register_adapter`` arrives in 9.3.0 — so an
+    installation that satisfies the floor may not have it. ``ImportError`` and
+    ``AttributeError`` are caught and nothing else: a broad ``except`` here
+    would swallow a real fault in the SDK's telemetry module and make this
+    integration silently stop declaring itself. Telemetry must never break a
+    caller's LLM call, and equally must never hide a defect.
+    """
+    try:
+        from axonflow import register_adapter
+    except ImportError:
+        # An SDK older than 9.3.0. Nothing to declare, and nothing is wrong.
+        return
+    try:
+        register_adapter("litellm")
+    except AttributeError:
+        # Defensive: a build where the symbol exists but is not callable.
+        return
+
+
 # ---------------------------------------------------------------------------
 # AxonFlowLogger
 # ---------------------------------------------------------------------------
@@ -214,6 +262,8 @@ class AxonFlowLogger(CustomLogger):
         async with self._client_lock:
             if self._client is None:
                 from axonflow import AxonFlow
+
+                _declare_adapter()
 
                 self._client = AxonFlow(
                     endpoint=self._config.endpoint,

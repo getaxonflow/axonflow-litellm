@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **This integration now declares itself on the AxonFlow SDK's existing
+  telemetry heartbeat (axonflow-enterprise#3682).** An application governed
+  through LiteLLM was previously indistinguishable from bare SDK use on every
+  telemetry dimension — same `sdk`, same `sdk_version`, same endpoint.
+  `adapter:litellm` now rides the `features` array of the heartbeat the SDK
+  already sends.
+
+  **No new network request, no new configuration surface, no second endpoint.**
+  Only the string `litellm` is contributed: no prompts, no completions, no model
+  names, no identities. `AXONFLOW_TELEMETRY=off` suppresses it with the rest of
+  the heartbeat.
+
+  The declaration happens once, immediately before the AxonFlow client is
+  constructed — not at module import. An import says this package is
+  *installed*; reaching that point says it is *being used to govern a call*, and
+  only the second is adoption signal. The position also matters for a second
+  reason: the SDK's heartbeat fires on the client's first outbound request, so a
+  declaration made afterwards would ride the next heartbeat a week later.
+
+  An SDK older than **9.3.0** does not have `register_adapter`; that is handled
+  as a silent no-op, so this integration continues to work unchanged against the
+  currently-declared floor of `axonflow>=8.2.0`.
+
 ## [1.0.4] - 2026-07-17
 
 ### Fixed

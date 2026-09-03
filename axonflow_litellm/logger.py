@@ -129,6 +129,58 @@ class _CircuitBreaker:
             self._probe_in_flight = False
 
 
+def _declare_adapter() -> None:
+    """Declare LiteLLM on the SDK's telemetry heartbeat.
+
+    Without this, an application governed through this integration is
+    indistinguishable from bare SDK use on every telemetry dimension — same
+    ``sdk``, same ``sdk_version``, same endpoint. See
+    ``axonflow.telemetry.register_adapter``: it adds ``adapter:litellm`` to the
+    ``features`` array of the heartbeat the SDK already sends, performs **no
+    I/O**, and adds no request of its own.
+
+    CALLED WHERE A CLIENT COMES INTO EXISTENCE — immediately before
+    ``AxonFlow(...)`` in :meth:`AxonFlowLogger._get_client`, and in
+    :meth:`AxonFlowLogger.from_client` where the caller injects one — never at
+    module import. The position is doing two jobs.
+
+    First, an import says this package is INSTALLED; reaching either call site
+    says it is actually being USED to govern a call, and only the second is
+    adoption signal. Importing ``axonflow_litellm`` in a test or a linter would
+    otherwise declare LiteLLM adoption that never happened.
+
+    Second, the SDK's heartbeat fires on the client's FIRST OUTBOUND REQUEST
+    (axonflow-enterprise#3682), so a declaration made after that request rides
+    the next heartbeat instead. Declaring where the client is created — before
+    any call through it — puts it on the very first ping.
+
+    Idempotent: the SDK's registry is a set, so repeat calls collapse.
+
+    ONE GUARD, AROUND THE IMPORT, CATCHING ONLY ``ImportError``.
+    ``pyproject.toml`` floors the SDK at ``axonflow>=8.2.0`` and
+    ``register_adapter`` arrives in 9.3.0, so an installation that satisfies the
+    floor may not have the symbol — that is the one expected failure, and it is
+    a silent no-op.
+
+    The CALL is deliberately UNGUARDED. An earlier version wrapped it in
+    ``except AttributeError``, which was wrong twice over: it would have
+    swallowed a genuine ``AttributeError`` raised *inside* the SDK's
+    ``register_adapter`` — masking a real defect in the telemetry module and
+    making this integration silently stop declaring itself, which is the same
+    invisible-adoption-data failure this feature exists to fix — and it did not
+    even catch what its own comment claimed, since calling a non-callable raises
+    ``TypeError``, not ``AttributeError``. Anything the call raises now
+    propagates.
+    """
+    try:
+        from axonflow import register_adapter
+    except ImportError:
+        # An SDK older than 9.3.0. Nothing to declare, and nothing is wrong.
+        return
+
+    register_adapter("litellm")
+
+
 # ---------------------------------------------------------------------------
 # AxonFlowLogger
 # ---------------------------------------------------------------------------
@@ -176,6 +228,17 @@ class AxonFlowLogger(CustomLogger):
         The caller owns the client lifecycle — ``aclose()`` is a no-op.
         """
         inst = cls(config)
+        # DECLARED HERE TOO, and this path is why the declaration cannot live
+        # only in `_get_client`: setting `_client` directly makes that method
+        # return on its first line, so an application that injects its own
+        # client would report as bare SDK use forever. Measured — the registry
+        # stayed empty on this path.
+        #
+        # The caller owns the client, and may well have made requests through it
+        # already; if so this declaration rides the next heartbeat rather than
+        # the first. That is strictly better than never declaring at all, and it
+        # is the best this path can offer.
+        _declare_adapter()
         inst._client = client
         inst._owns_client = False
         return inst
@@ -214,6 +277,8 @@ class AxonFlowLogger(CustomLogger):
         async with self._client_lock:
             if self._client is None:
                 from axonflow import AxonFlow
+
+                _declare_adapter()
 
                 self._client = AxonFlow(
                     endpoint=self._config.endpoint,

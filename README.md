@@ -13,11 +13,13 @@ pip install axonflow-litellm
 ```python
 from axonflow_litellm import AxonFlowLogger, AxonFlowLoggerConfig, PolicyDeniedError
 
-logger = AxonFlowLogger(AxonFlowLoggerConfig(
-    endpoint="http://localhost:8080",
-    client_id="my-app",
-    client_secret="...",
-))
+logger = AxonFlowLogger(
+    AxonFlowLoggerConfig(
+        endpoint="http://localhost:8080",
+        client_id="my-app",
+        client_secret="...",
+    )
+)
 
 try:
     response = logger.completion(

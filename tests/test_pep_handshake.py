@@ -22,7 +22,7 @@ from axonflow_litellm.pep_handshake import (
     encode_handshake,
 )
 
-GOLDEN = "eyJwcm9maWxlX3ZlcnNpb24iOjEsInBlcF9pZCI6ImxpdGVsbG0tZ2F0ZXdheSIsImF1ZGllbmNlIjoiYXhvbmZsb3ctZGVjaXNpb24tcHJvb2YiLCJjYXBhYmlsaXRpZXMiOltdfQ"
+GOLDEN = "eyJwcm9maWxlX3ZlcnNpb24iOjEsInBlcF9pZCI6ImxpdGVsbG0tZ2F0ZXdheSIsImF1ZGllbmNlIjoiYXhvbmZsb3ctZGVjaXNpb24tcHJvb2YiLCJjYXBhYmlsaXRpZXMiOltdfQ"  # noqa: E501 - a golden vector is one token; wrapping it would change what it pins
 AUDIENCE = "axonflow-decision-proof"
 
 

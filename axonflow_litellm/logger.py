@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import warnings
 from enum import Enum
@@ -13,6 +14,7 @@ from typing import Any
 from litellm.integrations.custom_logger import CustomLogger
 
 from axonflow_litellm.config import AxonFlowLoggerConfig
+from axonflow_litellm.pep_handshake import PEP_HANDSHAKE_HEADER, build_pep_handshake
 
 _log = logging.getLogger("axonflow_litellm")
 
@@ -186,6 +188,9 @@ def _declare_adapter() -> None:
 # ---------------------------------------------------------------------------
 
 
+_PEP_UNSET = object()
+
+
 class AxonFlowLogger(CustomLogger):
     """AxonFlow governance and audit for LiteLLM.
 
@@ -210,6 +215,8 @@ class AxonFlowLogger(CustomLogger):
         self._config = config
         self._client: Any = None
         self._client_lock = asyncio.Lock()
+        # Built on first use; see _pep_headers.
+        self._pep_handshake_cache: str | None | object = _PEP_UNSET
         self._owns_client = True
         self._breaker = _CircuitBreaker(
             failure_threshold=config.breaker_failure_threshold,
@@ -270,6 +277,25 @@ class AxonFlowLogger(CustomLogger):
         await self.aclose()
 
     # ----- Client management -----------------------------------------------
+
+    def _pep_headers(self) -> dict[str, str] | None:
+        """The ADR-065 declaration for a governed call, or None.
+
+        Built once and cached: a declaration is a property of the build and the
+        deployment, not of a request. Returns None rather than an empty dict
+        when unconfigured, so NO header is sent - a header PRESENT with an empty
+        value is MALFORMED to the platform and refuses the request, which an
+        ABSENT header does not.
+
+        A malformed audience raises here, at the first governed call, rather
+        than 400-ing every call in production.
+        """
+        if self._pep_handshake_cache is _PEP_UNSET:
+            audience = os.environ.get("AXONFLOW_PEP_AUDIENCE", "").strip() or None
+            self._pep_handshake_cache = build_pep_handshake(audience)
+        if self._pep_handshake_cache is None:
+            return None
+        return {PEP_HANDSHAKE_HEADER: self._pep_handshake_cache}
 
     async def _get_client(self) -> Any:
         if self._client is not None:
@@ -617,6 +643,15 @@ class AxonFlowLogger(CustomLogger):
             user_token=user_token,
             query=query,
             context=context if context else None,
+            # ADR-065 capability handshake (axonflow-enterprise#3763), read by
+            # the platform on this plane as of axonflow-enterprise#3778.
+            #
+            # Per-call rather than a client default: a process can be several
+            # enforcement points, and the SDK's extra_headers is the one
+            # mechanism for that (axonflow>=9.3.0). Omitted entirely when
+            # unconfigured, because a header PRESENT with an empty value is
+            # MALFORMED to the platform and refuses the request.
+            extra_headers=self._pep_headers(),
         )
 
     async def _do_audit(

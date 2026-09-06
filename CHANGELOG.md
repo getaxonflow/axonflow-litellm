@@ -2,20 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
 ## [1.1.0] - 2026-09-05
 
 ### Added
 
 - **The adapter now declares what it can enforce** (ADR-065 capability handshake; getaxonflow/axonflow-enterprise#3763). Set `AXONFLOW_PEP_AUDIENCE` to the audience your decision proofs are bound to, and every governed call carries `X-Axonflow-PEP-Handshake`. A platform running v10.4.0 or later that would attach a mandatory obligation this adapter has declared it cannot carry out refuses the request instead of handing over the instruction and assuming the adapter will act on it. Unset, the default, sends no header at all and nothing changes.
 - **The adapter declares no capabilities, and that is the honest answer.** A redaction obligation is discharged by substituting the platform's engine-masked content for the original, and AxonFlow does not permit a client to redact for itself. This adapter's governed call is `pre_check`, and it branches on `approved` and `block_reason` alone; it does not rewrite the prompt. A declaration describes what an enforcement point can do rather than what it should do, so it claims nothing and the platform refuses rather than allowing on the strength of a substitution the adapter does not perform.
-
-### Changed
-
-- **Requires `axonflow>=9.3.0`.** The declaration is presented through the SDK's per-call `extra_headers`, which that release adds.
-
-## [Unreleased]
-
-### Added
 
 - **This integration now declares itself on the AxonFlow SDK's existing
   telemetry heartbeat (axonflow-enterprise#3682).** An application governed
@@ -39,6 +33,10 @@ All notable changes to this project will be documented in this file.
   An SDK older than **9.3.0** does not have `register_adapter`; that is handled
   as a silent no-op, so this integration continues to work unchanged against the
   currently-declared floor of `axonflow>=8.2.0`.
+
+### Changed
+
+- **Requires `axonflow>=9.3.0`.** The declaration is presented through the SDK's per-call `extra_headers`, which that release adds.
 
 ## [1.0.4] - 2026-07-17
 

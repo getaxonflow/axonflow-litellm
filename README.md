@@ -105,7 +105,7 @@ What `user_token` must be depends on the AxonFlow deployment mode:
 
   Admins mint per-user tokens via the customer-portal admin API
   (`POST /api/v1/admin/organizations/{org_id}/user-tokens`) — see the
-  [per-user token provisioning guide](https://github.com/getaxonflow/axonflow-enterprise/blob/main/docs/enterprise/per-user-token-provisioning.md).
+  [per-user token provisioning guide](https://docs.getaxonflow.com/docs/enterprise/per-user-token-provisioning/).
   Admin-minted (HS256) tokens only: the pre-check plane pins the accepted
   algorithm to HS256, so tenant-OIDC access tokens (RS256) are rejected
   there. The audit trail then attributes each LLM call to that user.
@@ -170,7 +170,7 @@ LiteLLM is LLM-completion-focused. For MCP tool governance, use [AxonFlow's MCP 
 
 - Python >= 3.10
 - `litellm` >= 1.40
-- `axonflow` >= 8.2.0
+- `axonflow` >= 9.3.0
 
 ## Telemetry
 

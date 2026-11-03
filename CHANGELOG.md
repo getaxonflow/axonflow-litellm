@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.1.1] - Unpublished release candidate
+
+### Fixed
+
+- Treat the Python SDK's answered Hosted `429 hosted_monthly_limit_reached` as a definitive governance refusal under both fail modes. Ordinary capacity 429s and transport failures retain the configured availability fallback.
+
 ### Documentation
 
 - Explain verified Hosted Starter signup, Portal-linked API credentials, and fail-closed governed LiteLLM configuration.

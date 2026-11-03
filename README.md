@@ -35,7 +35,7 @@ except PolicyDeniedError as e:
 
 For Hosted Starter, start in the [verified Portal](https://portal.try.getaxonflow.com/hosted/start). After the owner activates a plan, download the Hosted API link command, run it locally, and approve its device code in the signed-in owner session. The protected `~/.config/axonflow/hosted-api.json` file supplies the `endpoint`, `clientId` for `client_id`, and `clientSecret` for `client_secret`. Keep that file and secret out of prompts and source control. This integration consumes a linked client credential; it does not create a tenant through anonymous `/api/v1/register`.
 
-For governed Hosted calls, use `AxonFlowLoggerConfig(fail_open=False)` with `logger.completion()` or `logger.acompletion()`. An answered 402 or 429 is a refusal regardless of the fail mode; restore the plan or wait for the allowance reset before retrying. LiteLLM's audit-only callback cannot block a call, so it is not an enforcement path.
+For governed Hosted calls, use `AxonFlowLoggerConfig(fail_open=False)` with `logger.completion()` or `logger.acompletion()`. An answered `402 hosted_payment_required` or `429 hosted_monthly_limit_reached` is a refusal regardless of the fail mode; restore the plan or wait for the allowance reset before retrying. Ordinary capacity 429s use the configured availability fallback. LiteLLM's audit-only callback cannot block a call, so it is not an enforcement path.
 
 ## How It Works
 

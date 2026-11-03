@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
+import litellm
 import pytest
 
 from axonflow_litellm.config import AxonFlowLoggerConfig
@@ -523,6 +524,7 @@ class TestFailOpen:
 
 AuthenticationError = sys.modules["axonflow.exceptions"].AuthenticationError
 BudgetExceededError = sys.modules["axonflow.exceptions"].BudgetExceededError
+RateLimitError = sys.modules["axonflow.exceptions"].RateLimitError
 PolicyViolationError = sys.modules["axonflow.exceptions"].PolicyViolationError
 
 
@@ -630,6 +632,64 @@ class TestPlatformRejectionFailsClosed:
                 model="gpt-4o",
                 messages=[{"role": "user", "content": "hi"}],
             )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fail_open", [True, False])
+    @pytest.mark.parametrize(
+        "refusal",
+        [
+            AuthenticationError("revoked linked credential"),
+            BudgetExceededError("Hosted payment required"),
+            RateLimitError(
+                "Hosted monthly allowance reached",
+                response_details={"error": "hosted_monthly_limit_reached"},
+            ),
+        ],
+    )
+    async def test_hosted_refusals_never_reach_litellm(
+        self, fake_client, fail_open, refusal, monkeypatch
+    ) -> None:
+        completion = AsyncMock(return_value=object())
+        monkeypatch.setattr(litellm, "acompletion", completion)
+        config = AxonFlowLoggerConfig(
+            endpoint="https://try.getaxonflow.com",
+            client_id="linked",
+            client_secret="secret",
+            fail_open=fail_open,
+        )
+        fake_client.pre_check = AsyncMock(side_effect=refusal)
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        with pytest.raises(PolicyDeniedError, match="rejected"):
+            await logger.acompletion(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        completion.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ordinary_rate_limit_uses_availability_fallback(
+        self, fake_client, monkeypatch
+    ) -> None:
+        completion = AsyncMock(return_value=object())
+        monkeypatch.setattr(litellm, "acompletion", completion)
+        config = AxonFlowLoggerConfig(
+            endpoint="https://try.getaxonflow.com",
+            client_id="linked",
+            client_secret="secret",
+            fail_open=True,
+        )
+        fake_client.pre_check = AsyncMock(
+            side_effect=RateLimitError(
+                "temporary capacity", response_details={"error": "rate_limited"}
+            )
+        )
+        logger = AxonFlowLogger.from_client(fake_client, config)
+        response = await logger.acompletion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert response is not None
+        completion.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_rejection_with_fail_closed_raises_policy_denied_with_cause(

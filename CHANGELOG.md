@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Documentation
+
+- Explain verified Hosted Starter signup, Portal-linked API credentials, and fail-closed governed LiteLLM configuration.
+
 ## [1.1.0] - 2026-09-05
 
 ### Added

@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [1.1.1] - Unpublished release candidate
+## [1.1.1] - 2026-11-04
 
 ### Fixed
 

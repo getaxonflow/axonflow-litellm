@@ -127,6 +127,11 @@ def _install_axonflow_stub() -> None:
         def __init__(self, message: str, **kwargs: Any) -> None:
             super().__init__(message)
 
+    class RateLimitError(AxonFlowError):
+        def __init__(self, message: str, *, response_details: dict[str, Any] | None = None) -> None:
+            super().__init__(message)
+            self.details = response_details or {}
+
     class PolicyViolationError(AxonFlowError):
         def __init__(self, message: str, **kwargs: Any) -> None:
             super().__init__(message)
@@ -206,6 +211,7 @@ def _install_axonflow_stub() -> None:
     exceptions_mod.AxonFlowError = AxonFlowError  # type: ignore[attr-defined]
     exceptions_mod.AuthenticationError = AuthenticationError  # type: ignore[attr-defined]
     exceptions_mod.BudgetExceededError = BudgetExceededError  # type: ignore[attr-defined]
+    exceptions_mod.RateLimitError = RateLimitError  # type: ignore[attr-defined]
     exceptions_mod.PolicyViolationError = PolicyViolationError  # type: ignore[attr-defined]
 
     sys.modules["axonflow"] = axonflow_mod

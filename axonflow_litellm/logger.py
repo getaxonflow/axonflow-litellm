@@ -55,7 +55,8 @@ def _is_platform_rejection(exc: Exception) -> bool:
 
     ``AuthenticationError`` (401 — bad client credentials or a rejected
     ``user_token``), ``BudgetExceededError`` (402 — a block-action budget
-    verdict) and ``PolicyViolationError`` (403 — e.g. tenant mismatch)
+    verdict), ``PolicyViolationError`` (403 — e.g. tenant mismatch), and a
+    ``RateLimitError`` carrying the Hosted monthly-cap error code (429)
     mean the platform is healthy and refused the request; they are never
     availability degradation.  Imported lazily to match the module's
     deferred ``axonflow`` imports.
@@ -65,11 +66,19 @@ def _is_platform_rejection(exc: Exception) -> bool:
             AuthenticationError,
             BudgetExceededError,
             PolicyViolationError,
+            RateLimitError,
         )
     except ImportError:  # pragma: no cover — every supported SDK ships these
         return False
 
-    return isinstance(exc, (AuthenticationError, BudgetExceededError, PolicyViolationError))
+    if isinstance(exc, (AuthenticationError, BudgetExceededError, PolicyViolationError)):
+        return True
+    details = getattr(exc, "details", None)
+    return (
+        isinstance(exc, RateLimitError)
+        and isinstance(details, dict)
+        and details.get("error") == "hosted_monthly_limit_reached"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -382,10 +391,7 @@ class AxonFlowLogger(CustomLogger):
                     # one has been rotated/revoked.
                     _log.error(
                         "axonflow.%s rejected by the platform: %s — failing closed. "
-                        "Check client credentials and user_token: enterprise/evaluation "
-                        "deployments validate user_token and reject placeholders like "
-                        "the default 'anonymous' (mint a per-user token via the admin "
-                        "token API — see README).",
+                        "Resolve the reported refusal before retrying.",
                         op_name,
                         exc,
                     )
